@@ -1,0 +1,25 @@
+# Environment variables — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Data — users.json is committed as empty {}; do not commit live data
+# (Remove this line if you want Git to track it for small deployments)
+# data/users.json
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+.env
+data/users.json

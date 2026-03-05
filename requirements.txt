@@ -1,0 +1,9 @@
+python-telegram-bot>=20.0
+anthropic
+yfinance
+newsapi-python
+openpyxl
+pytz
+requests
+pandas
+python-dotenv

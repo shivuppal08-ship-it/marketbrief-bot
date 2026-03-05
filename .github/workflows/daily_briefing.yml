@@ -1,0 +1,32 @@
+name: Daily Market Briefing
+
+on:
+  schedule:
+    # Every 30 minutes, Monday–Friday, all day — covers any timezone
+    - cron: "0,30 * * * 1-5"
+  workflow_dispatch:  # Allow manual trigger for testing
+
+jobs:
+  send-briefings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scheduler
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scheduler.py
