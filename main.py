@@ -687,21 +687,8 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         utc_display = "UTC"
 
-    # Warn if briefing time falls outside the scheduler's UTC 11–23 window
-    bh, bm = [int(x) for x in time_str.split(":")]
-    briefing_local = datetime.now(tz).replace(hour=bh, minute=bm, second=0, microsecond=0)
-    briefing_utc_hour = briefing_local.astimezone(pytz.utc).hour
-    if not (11 <= briefing_utc_hour <= 22):
-        window_warning = (
-            "\n\n⚠️ *Note:* That time is outside the scheduler's delivery window "
-            "\\(roughly 6am–6pm EST / 3am–3pm PST\\)\\. "
-            "Consider setting a time between *7am–10am* in your timezone for reliable delivery\\."
-        )
-    else:
-        window_warning = ""
-
     confirm_text = (
-        f"Got it — *{_esc(time_display)}* {_esc(tz_str)} \\({_esc(utc_display)}\\) ✅{window_warning}\n\n"
+        f"Got it — *{_esc(time_display)}* {_esc(tz_str)} \\({_esc(utc_display)}\\) ✅\n\n"
     )
 
     # Settings-change re-run: confirm and exit
