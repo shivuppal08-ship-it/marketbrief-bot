@@ -828,7 +828,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     watchlist = user.get("watchlist", [])
     if watchlist:
         lines = [
-            f"• {w['ticker']} — {w.get('company_name', '—')} \\({w.get('sector', 'Unknown')}\\)"
+            f"• {_esc(w['ticker'])} — {_esc(w.get('company_name', '—'))} \\({_esc(w.get('sector', 'Unknown'))}\\)"
             for w in watchlist
         ]
         text = (
