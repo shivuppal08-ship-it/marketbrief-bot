@@ -13,6 +13,8 @@ import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
 import anthropic
 import pytz
 from dotenv import load_dotenv
@@ -30,6 +32,7 @@ from telegram.ext import (
 
 from utils.market_data import validate_tickers_parallel
 from utils.sheets import fetch_tickers_from_sheets, parse_excel_tickers
+from briefing import generate_briefing_for_user
 
 load_dotenv()
 
@@ -344,6 +347,74 @@ def update_user(uid: str, fields: dict) -> None:
         users[uid] = {}
     users[uid].update(fields)
     save_users(users)
+
+
+# ---------------------------------------------------------------------------
+# APScheduler — in-process briefing scheduler
+# ---------------------------------------------------------------------------
+
+def _should_send_briefing(user: dict, now_utc: datetime) -> bool:
+    """
+    Returns True if the user should receive a briefing at this exact minute.
+    Called every minute by APScheduler — uses exact HH:MM match (no window).
+    """
+    if not user.get("onboarding_complete"):
+        return False
+    if not user.get("watchlist"):
+        return False
+
+    tz_str = user.get("timezone", "UTC")
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.utc
+
+    now_local = now_utc.astimezone(tz)
+
+    if now_local.weekday() >= 5:  # skip weekends
+        return False
+
+    today_str = now_local.date().isoformat()
+    if user.get("last_briefing_date") == today_str:
+        return False
+
+    briefing_time_str = user.get("briefing_time", "08:00")
+    try:
+        bh, bm = [int(x) for x in briefing_time_str.split(":")]
+    except (ValueError, AttributeError):
+        return False
+
+    return now_local.hour == bh and now_local.minute == bm
+
+
+def _scheduler_tick() -> None:
+    """Called every minute by APScheduler. Sends briefings to eligible users."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not bot_token:
+        return
+
+    now_utc = datetime.now(pytz.utc)
+    users = load_users()
+    eligible = [u for u in users.values() if _should_send_briefing(u, now_utc)]
+
+    if not eligible:
+        return
+
+    logger.info(f"APScheduler: {len(eligible)} user(s) eligible — sending briefing(s).")
+
+    async def _run():
+        tasks = [generate_briefing_for_user(u, bot_token) for u in eligible]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
+def _start_apscheduler() -> None:
+    """Starts APScheduler in a background thread, ticking every minute."""
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(_scheduler_tick, "interval", minutes=1, id="briefing_scheduler")
+    scheduler.start()
+    logger.info("APScheduler started — checking for briefings every minute.")
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1357,9 @@ def main() -> None:
 
     # Start health-check server for Render in a background daemon thread
     threading.Thread(target=_start_health_server, daemon=True).start()
+
+    # Start in-process briefing scheduler (replaces GitHub Actions cron)
+    _start_apscheduler()
 
     # --- Webhook swap point ---
     # To switch from polling to Telegram webhook mode (recommended for production on Render):

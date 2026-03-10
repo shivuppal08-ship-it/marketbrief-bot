@@ -7,3 +7,4 @@ pytz
 requests
 pandas
 python-dotenv
+APScheduler
