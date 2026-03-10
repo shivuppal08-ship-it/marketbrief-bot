@@ -58,6 +58,12 @@ def _normalize_sector(raw: str | None) -> str:
     return SECTOR_MAP.get(raw, raw)
 
 
+def _is_etf(info: dict) -> bool:
+    """Returns True if the security is an ETF, mutual fund, or index."""
+    quote_type = (info.get("quoteType") or "").upper()
+    return quote_type in {"ETF", "MUTUALFUND", "INDEX"}
+
+
 # ---------------------------------------------------------------------------
 # Volatility classification
 # ---------------------------------------------------------------------------
@@ -80,19 +86,41 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
     """
     Validates a ticker and returns an enriched watchlist entry dict, or None
     if the ticker is invalid.  Wraps yfinance — may be flaky on bad networks.
+
+    ETFs often return 404 from the fundamentals endpoint; we fall back to
+    price history to confirm the ticker exists and return a basic entry.
     """
     try:
         t = yf.Ticker(ticker.upper())
-        info = t.info
 
-        # quoteType is present for all valid securities
+        # .info can throw 404 for ETFs — treat that as a soft failure
+        try:
+            info = t.info
+        except Exception:
+            info = {}
+
         if not info or not info.get("quoteType"):
-            return None
+            # .info unavailable — confirm ticker exists via price history
+            hist = t.history(period="5d")
+            if hist is None or hist.empty:
+                return None
+            # Ticker exists but fundamentals unavailable — treat as ETF
+            return {
+                "ticker": ticker.upper(),
+                "company_name": ticker.upper(),
+                "sector": "Broad Market",
+                "thesis": None,
+                "why_added": None,
+                "volatility_tier": "medium",
+                "date_added": datetime.today().strftime("%Y-%m-%d"),
+                "status": "holding",
+            }
 
         company_name = info.get("longName") or info.get("shortName") or ticker.upper()
         raw_sector = info.get("sector") or info.get("quoteType", "")
         sector = _normalize_sector(raw_sector)
-        beta = info.get("beta")
+        # ETFs don't have meaningful beta — skip to avoid 404 on fundamentals endpoint
+        beta = None if _is_etf(info) else info.get("beta")
         volatility_tier = classify_volatility(beta)
 
         return {
@@ -233,13 +261,23 @@ def get_sector_data(sectors_needed: list[str]) -> dict:
 
 def get_stock_data(tickers: list[str]) -> dict:
     """
-    Returns for each ticker: today's % change, current price, volume vs
-    30-day average volume.
+    Returns for each ticker: today's % change and current price.
+    For stocks, also returns volume vs 30-day average volume.
+    For ETFs, fundamentals endpoints are skipped — only price/performance is fetched.
     """
     results: dict = {}
     for ticker_str in tickers:
         try:
             t = yf.Ticker(ticker_str)
+
+            # Lightweight ETF detection via fast_info (avoids fundamentals 404)
+            is_etf_ticker = False
+            try:
+                qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
+                is_etf_ticker = qt in {"ETF", "MUTUALFUND", "INDEX"}
+            except Exception:
+                pass
+
             hist_30 = t.history(period="30d")
             if hist_30 is None or len(hist_30) < 2:
                 results[ticker_str] = None
@@ -249,18 +287,22 @@ def get_stock_data(tickers: list[str]) -> dict:
             prev_close = float(hist_30["Close"].iloc[-2])
             change_pct = round(((curr_close - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
 
-            curr_vol = int(hist_30["Volume"].iloc[-1])
-            avg_vol = int(hist_30["Volume"].mean()) if not hist_30.empty else curr_vol
-            vol_ratio = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 1.0
-
-            results[ticker_str] = {
+            entry = {
                 "ticker": ticker_str,
                 "price": round(curr_close, 2),
                 "change_pct": change_pct,
-                "volume": curr_vol,
-                "avg_volume": avg_vol,
-                "volume_ratio": vol_ratio,
+                "is_etf": is_etf_ticker,
             }
+
+            if not is_etf_ticker:
+                # Volume ratio is stock-specific; skip for ETFs
+                curr_vol = int(hist_30["Volume"].iloc[-1])
+                avg_vol = int(hist_30["Volume"].mean()) if not hist_30.empty else curr_vol
+                entry["volume"] = curr_vol
+                entry["avg_volume"] = avg_vol
+                entry["volume_ratio"] = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+
+            results[ticker_str] = entry
         except Exception as e:
             logger.warning(f"Failed to fetch stock data for {ticker_str}: {e}")
             results[ticker_str] = None
@@ -273,9 +315,17 @@ def get_stock_data(tickers: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_beta(ticker: str) -> float | None:
-    """Returns the stock's beta vs S&P 500 from yfinance info."""
+    """Returns beta for stocks; returns None for ETFs (no meaningful beta)."""
     try:
-        info = yf.Ticker(ticker).info
+        t = yf.Ticker(ticker)
+        # Use fast_info for lightweight ETF check before hitting fundamentals endpoint
+        try:
+            qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
+            if qt in {"ETF", "MUTUALFUND", "INDEX"}:
+                return None
+        except Exception:
+            pass
+        info = t.info
         return info.get("beta")
     except Exception as e:
         logger.warning(f"Failed to fetch beta for {ticker}: {e}")
@@ -297,6 +347,15 @@ def get_earnings_calendar(tickers: list[str]) -> list[dict]:
     for ticker_str in tickers:
         try:
             t = yf.Ticker(ticker_str)
+
+            # ETFs don't have earnings calendars — skip them
+            try:
+                qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
+                if qt in {"ETF", "MUTUALFUND", "INDEX"}:
+                    continue
+            except Exception:
+                pass
+
             cal = t.calendar
 
             if cal is None:

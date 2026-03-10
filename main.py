@@ -9,7 +9,9 @@ import json
 import logging
 import re
 import tempfile
+import threading
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import anthropic
 import pytz
@@ -38,6 +40,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
+
+
+def _start_health_server() -> None:
+    """
+    Minimal HTTP server for Render's health-check requirement.
+    Binds to PORT env var (default 8080) and responds 200 to GET /.
+    Runs in a daemon thread so it doesn't block the Telegram polling loop.
+    """
+    port = int(os.environ.get("PORT", 8080))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            pass  # suppress per-request access logs
+
+    server = HTTPServer(("0.0.0.0", port), _Handler)
+    logger.info(f"Health-check server listening on port {port}")
+    server.serve_forever()
 
 
 def _esc(text: str) -> str:
@@ -1256,6 +1280,18 @@ def main() -> None:
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # Start health-check server for Render in a background daemon thread
+    threading.Thread(target=_start_health_server, daemon=True).start()
+
+    # --- Webhook swap point ---
+    # To switch from polling to Telegram webhook mode (recommended for production on Render):
+    #   1. Remove the _start_health_server() thread above (webhook runner handles its own HTTP server)
+    #   2. Replace app.run_polling(...) below with:
+    #      app.run_webhook(
+    #          listen="0.0.0.0",
+    #          port=int(os.environ.get("PORT", 8080)),
+    #          webhook_url=os.environ["WEBHOOK_URL"],  # e.g. https://your-app.onrender.com/<TOKEN>
+    #      )
     logger.info("MarketBrief bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
