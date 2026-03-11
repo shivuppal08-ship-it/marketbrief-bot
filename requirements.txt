@@ -1,10 +1,9 @@
 python-telegram-bot>=20.0
 anthropic
-yfinance
+finnhub-python
 newsapi-python
 openpyxl
 pytz
 requests
-pandas
 python-dotenv
 APScheduler

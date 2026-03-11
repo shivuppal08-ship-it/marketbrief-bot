@@ -1,21 +1,36 @@
 """
 utils/market_data.py
-Fetches market data using yfinance. All network calls wrapped in try/except.
+Fetches market data using Finnhub. All network calls wrapped in try/except.
 """
 
 import asyncio
 import logging
+import os
+import time
 from datetime import datetime, timedelta
 
-import yfinance as yf
+import finnhub
 
 logger = logging.getLogger(__name__)
+
+# Finnhub client — lazy-initialized singleton
+_finnhub_client: finnhub.Client | None = None
+
+
+def _get_client() -> finnhub.Client:
+    global _finnhub_client
+    if _finnhub_client is None:
+        api_key = os.environ.get("FINNHUB_API_KEY", "")
+        _finnhub_client = finnhub.Client(api_key=api_key)
+    return _finnhub_client
+
 
 # ---------------------------------------------------------------------------
 # Sector normalisation
 # ---------------------------------------------------------------------------
 
 SECTOR_MAP: dict[str, str] = {
+    # Standard sector names (kept for backwards compat with stored watchlist data)
     "Technology": "Technology",
     "Healthcare": "Healthcare",
     "Health Care": "Healthcare",
@@ -35,6 +50,34 @@ SECTOR_MAP: dict[str, str] = {
     "EQUITY": "Broad Market",
     "INDEX": "Broad Market",
     "MUTUALFUND": "Broad Market",
+    # Finnhub finnhubIndustry values
+    "Media": "Communication",
+    "Telecommunication Services": "Communication",
+    "Biotechnology": "Healthcare",
+    "Pharmaceuticals": "Healthcare",
+    "Medical Devices": "Healthcare",
+    "Semiconductors": "Technology",
+    "Software": "Technology",
+    "Software—Application": "Technology",
+    "Software—Infrastructure": "Technology",
+    "Internet Content & Information": "Technology",
+    "Banks": "Financials",
+    "Banks—Diversified": "Financials",
+    "Insurance": "Financials",
+    "Asset Management": "Financials",
+    "Capital Markets": "Financials",
+    "Oil & Gas": "Energy",
+    "Oil & Gas E&P": "Energy",
+    "Retail—Cyclical": "Consumer",
+    "Automobiles": "Consumer",
+    "Aerospace & Defense": "Industrials",
+    "Transportation": "Industrials",
+    "Electric Utilities": "Utilities",
+    "Gas Utilities": "Utilities",
+    "Gold": "Materials",
+    "Chemicals": "Materials",
+    "REIT": "Real Estate",
+    "Real Estate Services": "Real Estate",
 }
 
 SECTOR_TO_ETF: dict[str, str] = {
@@ -58,10 +101,36 @@ def _normalize_sector(raw: str | None) -> str:
     return SECTOR_MAP.get(raw, raw)
 
 
-def _is_etf(info: dict) -> bool:
-    """Returns True if the security is an ETF, mutual fund, or index."""
-    quote_type = (info.get("quoteType") or "").upper()
-    return quote_type in {"ETF", "MUTUALFUND", "INDEX"}
+# ---------------------------------------------------------------------------
+# Finnhub low-level helpers
+# ---------------------------------------------------------------------------
+
+def _quote(symbol: str) -> dict | None:
+    """
+    Calls Finnhub /quote for the given symbol.
+    Returns the quote dict if the current price is non-zero, else None.
+    Keys: c (current), d (change), dp (% change), h, l, o, pc (prev close), t.
+    """
+    try:
+        q = _get_client().quote(symbol)
+        if not q or q.get("c", 0) == 0:
+            return None
+        return q
+    except Exception as e:
+        logger.warning(f"Finnhub quote failed for {symbol}: {e}")
+        return None
+
+
+def _profile(symbol: str) -> dict:
+    """
+    Calls Finnhub /stock/profile2.
+    Returns a non-empty dict for stocks; empty dict for ETFs / unknown symbols.
+    """
+    try:
+        return _get_client().company_profile2(symbol=symbol) or {}
+    except Exception as e:
+        logger.warning(f"Finnhub profile failed for {symbol}: {e}")
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -85,29 +154,22 @@ def classify_volatility(beta: float | None) -> str:
 def validate_and_enrich_ticker(ticker: str) -> dict | None:
     """
     Validates a ticker and returns an enriched watchlist entry dict, or None
-    if the ticker is invalid.  Wraps yfinance — may be flaky on bad networks.
-
-    ETFs often return 404 from the fundamentals endpoint; we fall back to
-    price history to confirm the ticker exists and return a basic entry.
+    if the ticker is invalid. Uses Finnhub company_profile2 + quote.
     """
     try:
-        t = yf.Ticker(ticker.upper())
+        symbol = ticker.upper()
+        profile = _profile(symbol)
 
-        # .info can throw 404 for ETFs — treat that as a soft failure
-        try:
-            info = t.info
-        except Exception:
-            info = {}
-
-        if not info or not info.get("quoteType"):
-            # .info unavailable — confirm ticker exists via price history
-            hist = t.history(period="5d")
-            if hist is None or hist.empty:
+        if not profile.get("name"):
+            # Empty profile — ETF or unknown ticker.
+            # Confirm existence via quote before accepting.
+            q = _quote(symbol)
+            if q is None:
                 return None
-            # Ticker exists but fundamentals unavailable — treat as ETF
+            # Ticker exists but no profile — treat as ETF / Broad Market
             return {
-                "ticker": ticker.upper(),
-                "company_name": ticker.upper(),
+                "ticker": symbol,
+                "company_name": symbol,
                 "sector": "Broad Market",
                 "thesis": None,
                 "why_added": None,
@@ -116,25 +178,30 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
                 "status": "holding",
             }
 
-        company_name = info.get("longName") or info.get("shortName") or ticker.upper()
-        raw_sector = info.get("sector") or info.get("quoteType", "")
-        sector = _normalize_sector(raw_sector)
-        # ETFs don't have meaningful beta — skip to avoid 404 on fundamentals endpoint
-        beta = None if _is_etf(info) else info.get("beta")
-        volatility_tier = classify_volatility(beta)
+        company_name = profile.get("name", symbol)
+        raw_industry = profile.get("finnhubIndustry", "")
+        sector = _normalize_sector(raw_industry)
+
+        # Fetch beta from basic financials for volatility classification
+        beta: float | None = None
+        try:
+            metrics = _get_client().company_basic_financials(symbol, "all")
+            beta = (metrics.get("metric") or {}).get("beta")
+        except Exception:
+            pass
 
         return {
-            "ticker": ticker.upper(),
+            "ticker": symbol,
             "company_name": company_name,
             "sector": sector,
             "thesis": None,
             "why_added": None,
-            "volatility_tier": volatility_tier,
+            "volatility_tier": classify_volatility(beta),
             "date_added": datetime.today().strftime("%Y-%m-%d"),
             "status": "holding",
         }
     except Exception as e:
-        logger.warning(f"yfinance validation error for {ticker}: {e}")
+        logger.warning(f"Finnhub validation error for {ticker}: {e}")
         return None
 
 
@@ -157,68 +224,53 @@ async def validate_tickers_parallel(
 
 
 # ---------------------------------------------------------------------------
-# Price change helper
-# ---------------------------------------------------------------------------
-
-def _pct_change(hist) -> float | None:
-    """Return % change between last two closing prices in a history DataFrame."""
-    if hist is None or len(hist) < 2:
-        return None
-    prev = hist["Close"].iloc[-2]
-    curr = hist["Close"].iloc[-1]
-    if prev == 0:
-        return None
-    return round(((curr - prev) / prev) * 100, 2)
-
-
-# ---------------------------------------------------------------------------
 # Market-wide index data
 # ---------------------------------------------------------------------------
 
-INDICES = {
-    "sp500":        "^GSPC",
-    "nasdaq":       "^IXIC",
-    "dow":          "^DJI",
-    "treasury_10y": "^TNX",
+# Finnhub free tier does not support index tickers (^GSPC, ^IXIC, ^DJI).
+# Use ETF proxies: SPY ≈ S&P 500, QQQ ≈ Nasdaq, DIA ≈ Dow Jones.
+_INDEX_PROXIES: dict[str, str] = {
+    "sp500":  "SPY",
+    "nasdaq": "QQQ",
+    "dow":    "DIA",
 }
+_TREASURY_SYMBOL = "^TNX"
 
 
 def get_index_data() -> dict:
     """
     Returns today's performance for S&P 500, Nasdaq, Dow, and 10-yr Treasury.
 
-    Treasury yield is expressed as percentage points change (not % of yield),
-    e.g. +0.05 means the yield rose 5 basis points.
+    S&P 500, Nasdaq, and Dow are proxied via SPY, QQQ, and DIA ETFs.
+    Treasury yield change is in percentage points (basis points / 100).
     """
     results: dict = {}
-    for name, symbol in INDICES.items():
-        try:
-            t = yf.Ticker(symbol)
-            hist = t.history(period="2d")
-            if len(hist) < 2:
-                results[name] = None
-                continue
 
-            curr = round(float(hist["Close"].iloc[-1]), 4)
-            prev = round(float(hist["Close"].iloc[-2]), 4)
-
-            if name == "treasury_10y":
-                # Yield is the price; change is in percentage points
-                results[name] = {
-                    "symbol": symbol,
-                    "yield_pct": curr,
-                    "change_pp": round(curr - prev, 3),
-                }
-            else:
-                pct = round(((curr - prev) / prev) * 100, 2) if prev else 0.0
-                results[name] = {
-                    "symbol": symbol,
-                    "price": curr,
-                    "change_pct": pct,
-                }
-        except Exception as e:
-            logger.warning(f"Failed to fetch index {symbol}: {e}")
+    for name, symbol in _INDEX_PROXIES.items():
+        q = _quote(symbol)
+        if q is None:
             results[name] = None
+            continue
+        results[name] = {
+            "symbol": symbol,
+            "price": round(q["c"], 4),
+            "change_pct": round(q["dp"], 2),
+        }
+
+    # 10-yr Treasury yield — may return zeros on Finnhub free tier; handle gracefully
+    try:
+        q = _get_client().quote(_TREASURY_SYMBOL)
+        if q and q.get("c", 0) != 0:
+            results["treasury_10y"] = {
+                "symbol": _TREASURY_SYMBOL,
+                "yield_pct": round(q["c"], 3),
+                "change_pp": round(q["d"], 3),
+            }
+        else:
+            results["treasury_10y"] = None
+    except Exception as e:
+        logger.warning(f"Finnhub treasury quote failed: {e}")
+        results["treasury_10y"] = None
 
     return results
 
@@ -236,21 +288,15 @@ def get_sector_data(sectors_needed: list[str]) -> dict:
     results: dict = {}
 
     for symbol in etf_symbols:
-        try:
-            t = yf.Ticker(symbol)
-            hist = t.history(period="2d")
-            change = _pct_change(hist)
-            if change is None:
-                results[symbol] = None
-                continue
-            results[symbol] = {
-                "symbol": symbol,
-                "price": round(float(hist["Close"].iloc[-1]), 2),
-                "change_pct": change,
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch sector ETF {symbol}: {e}")
+        q = _quote(symbol)
+        if q is None:
             results[symbol] = None
+            continue
+        results[symbol] = {
+            "symbol": symbol,
+            "price": round(q["c"], 2),
+            "change_pct": round(q["dp"], 2),
+        }
 
     return results
 
@@ -263,46 +309,47 @@ def get_stock_data(tickers: list[str]) -> dict:
     """
     Returns for each ticker: today's % change and current price.
     For stocks, also returns volume vs 30-day average volume.
-    For ETFs, fundamentals endpoints are skipped — only price/performance is fetched.
+    ETF detection: empty company profile → treat as ETF, skip volume fields.
     """
     results: dict = {}
+    client = _get_client()
+
     for ticker_str in tickers:
         try:
-            t = yf.Ticker(ticker_str)
-
-            # Lightweight ETF detection via fast_info (avoids fundamentals 404)
-            is_etf_ticker = False
-            try:
-                qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
-                is_etf_ticker = qt in {"ETF", "MUTUALFUND", "INDEX"}
-            except Exception:
-                pass
-
-            hist_30 = t.history(period="30d")
-            if hist_30 is None or len(hist_30) < 2:
+            q = _quote(ticker_str)
+            if q is None:
                 results[ticker_str] = None
                 continue
 
-            curr_close = float(hist_30["Close"].iloc[-1])
-            prev_close = float(hist_30["Close"].iloc[-2])
-            change_pct = round(((curr_close - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+            # ETF detection: stocks have a company profile; ETFs return empty dict
+            profile = _profile(ticker_str)
+            is_etf_ticker = not bool(profile.get("name"))
 
             entry = {
                 "ticker": ticker_str,
-                "price": round(curr_close, 2),
-                "change_pct": change_pct,
+                "price": round(q["c"], 2),
+                "change_pct": round(q["dp"], 2),
                 "is_etf": is_etf_ticker,
             }
 
             if not is_etf_ticker:
-                # Volume ratio is stock-specific; skip for ETFs
-                curr_vol = int(hist_30["Volume"].iloc[-1])
-                avg_vol = int(hist_30["Volume"].mean()) if not hist_30.empty else curr_vol
-                entry["volume"] = curr_vol
-                entry["avg_volume"] = avg_vol
-                entry["volume_ratio"] = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+                # Fetch 30 days of daily candles for volume ratio calculation
+                try:
+                    end_ts = int(time.time())
+                    start_ts = end_ts - 30 * 24 * 3600
+                    candles = client.stock_candles(ticker_str, "D", start_ts, end_ts)
+                    if candles and candles.get("s") == "ok" and candles.get("v"):
+                        volumes = candles["v"]
+                        curr_vol = int(volumes[-1])
+                        avg_vol = int(sum(volumes) / len(volumes))
+                        entry["volume"] = curr_vol
+                        entry["avg_volume"] = avg_vol
+                        entry["volume_ratio"] = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+                except Exception as e:
+                    logger.warning(f"Candle fetch failed for {ticker_str}: {e}")
 
             results[ticker_str] = entry
+
         except Exception as e:
             logger.warning(f"Failed to fetch stock data for {ticker_str}: {e}")
             results[ticker_str] = None
@@ -317,16 +364,11 @@ def get_stock_data(tickers: list[str]) -> dict:
 def get_beta(ticker: str) -> float | None:
     """Returns beta for stocks; returns None for ETFs (no meaningful beta)."""
     try:
-        t = yf.Ticker(ticker)
-        # Use fast_info for lightweight ETF check before hitting fundamentals endpoint
-        try:
-            qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
-            if qt in {"ETF", "MUTUALFUND", "INDEX"}:
-                return None
-        except Exception:
-            pass
-        info = t.info
-        return info.get("beta")
+        profile = _profile(ticker.upper())
+        if not profile.get("name"):
+            return None  # ETF or unknown — no beta
+        metrics = _get_client().company_basic_financials(ticker.upper(), "all")
+        return (metrics.get("metric") or {}).get("beta")
     except Exception as e:
         logger.warning(f"Failed to fetch beta for {ticker}: {e}")
         return None
@@ -341,55 +383,26 @@ def get_earnings_calendar(tickers: list[str]) -> list[dict]:
     Returns upcoming earnings within 14 days for tickers in the watchlist.
     Results sorted by earnings date ascending.
     """
-    cutoff = datetime.today() + timedelta(days=14)
+    today = datetime.today()
+    from_date = today.strftime("%Y-%m-%d")
+    to_date = (today + timedelta(days=14)).strftime("%Y-%m-%d")
     results: list[dict] = []
+    client = _get_client()
 
     for ticker_str in tickers:
         try:
-            t = yf.Ticker(ticker_str)
-
-            # ETFs don't have earnings calendars — skip them
-            try:
-                qt = (getattr(t.fast_info, "quote_type", None) or "").upper()
-                if qt in {"ETF", "MUTUALFUND", "INDEX"}:
-                    continue
-            except Exception:
-                pass
-
-            cal = t.calendar
-
-            if cal is None:
+            # ETFs don't have earnings — skip if profile is empty
+            profile = _profile(ticker_str)
+            if not profile.get("name"):
                 continue
 
-            # yfinance returns different formats across versions
-            if isinstance(cal, dict):
-                earnings_dates = cal.get("Earnings Date", [])
-            elif hasattr(cal, "to_dict"):
-                d = cal.to_dict()
-                earnings_dates = d.get("Earnings Date", [])
-            else:
-                continue
-
-            if not isinstance(earnings_dates, list):
-                earnings_dates = [earnings_dates]
-
-            for ed in earnings_dates:
-                if ed is None:
-                    continue
-                if isinstance(ed, str):
-                    try:
-                        ed = datetime.strptime(ed[:10], "%Y-%m-%d")
-                    except ValueError:
-                        continue
-                if hasattr(ed, "to_pydatetime"):
-                    ed = ed.to_pydatetime()
-                if isinstance(ed, datetime) and ed.replace(tzinfo=None) <= cutoff:
-                    results.append({
-                        "ticker": ticker_str,
-                        "earnings_date": ed.strftime("%Y-%m-%d"),
-                    })
-                    break  # only first upcoming date per ticker
-
+            cal = client.earnings_calendar(_from=from_date, to=to_date, symbol=ticker_str)
+            entries = (cal or {}).get("earningsCalendar") or []
+            if entries:
+                results.append({
+                    "ticker": ticker_str,
+                    "earnings_date": entries[0]["date"],
+                })
         except Exception as e:
             logger.warning(f"Failed to fetch earnings for {ticker_str}: {e}")
 
