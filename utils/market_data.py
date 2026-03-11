@@ -6,7 +6,6 @@ Fetches market data using Finnhub. All network calls wrapped in try/except.
 import asyncio
 import logging
 import os
-import time
 from datetime import datetime, timedelta
 
 import finnhub
@@ -308,11 +307,9 @@ def get_sector_data(sectors_needed: list[str]) -> dict:
 def get_stock_data(tickers: list[str]) -> dict:
     """
     Returns for each ticker: today's % change and current price.
-    For stocks, also returns volume vs 30-day average volume.
-    ETF detection: empty company profile → treat as ETF, skip volume fields.
+    ETF detection: empty company profile → treat as ETF.
     """
     results: dict = {}
-    client = _get_client()
 
     for ticker_str in tickers:
         try:
@@ -325,30 +322,12 @@ def get_stock_data(tickers: list[str]) -> dict:
             profile = _profile(ticker_str)
             is_etf_ticker = not bool(profile.get("name"))
 
-            entry = {
+            results[ticker_str] = {
                 "ticker": ticker_str,
                 "price": round(q["c"], 2),
                 "change_pct": round(q["dp"], 2),
                 "is_etf": is_etf_ticker,
             }
-
-            if not is_etf_ticker:
-                # Fetch 30 days of daily candles for volume ratio calculation
-                try:
-                    end_ts = int(time.time())
-                    start_ts = end_ts - 30 * 24 * 3600
-                    candles = client.stock_candles(ticker_str, "D", start_ts, end_ts)
-                    if candles and candles.get("s") == "ok" and candles.get("v"):
-                        volumes = candles["v"]
-                        curr_vol = int(volumes[-1])
-                        avg_vol = int(sum(volumes) / len(volumes))
-                        entry["volume"] = curr_vol
-                        entry["avg_volume"] = avg_vol
-                        entry["volume_ratio"] = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 1.0
-                except Exception as e:
-                    logger.warning(f"Candle fetch failed for {ticker_str}: {e}")
-
-            results[ticker_str] = entry
 
         except Exception as e:
             logger.warning(f"Failed to fetch stock data for {ticker_str}: {e}")

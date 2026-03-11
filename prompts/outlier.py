@@ -21,8 +21,7 @@ def build_outlier_prompt(
         d = stock_data.get(t)
         if d:
             stock_lines.append(
-                f"- {t} ({w.get('company_name', t)}): {d['change_pct']:+.2f}%  "
-                f"| vol ratio: {d['volume_ratio']:.1f}x avg"
+                f"- {t} ({w.get('company_name', t)}): {d['change_pct']:+.2f}%"
             )
         else:
             stock_lines.append(f"- {t}: data unavailable")
