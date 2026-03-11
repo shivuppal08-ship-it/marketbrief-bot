@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -139,6 +140,57 @@ def _save_last_briefing_date(telegram_id: str, date_str: str) -> None:
                 json.dump(users, f, indent=2)
     except Exception as e:
         logger.warning(f"Could not update last_briefing_date for {telegram_id}: {e}")
+
+
+# ── Telegram send helpers ─────────────────────────────────────────────────────
+
+def _sanitize_markdown(text: str) -> str:
+    """
+    Sanitize Claude's output for Telegram Markdown v1 (ParseMode.MARKDOWN).
+    Fixes the most common parse errors without stripping intentional formatting:
+    - Converts **double-asterisk bold** to *single-asterisk bold* (Telegram v1 syntax)
+    - Escapes underscores within compound words (e.g. year_over_year) to prevent
+      false italic/underline parsing
+    - Escapes lone square brackets that aren't part of [link](url) syntax
+    """
+    # **bold** → *bold*  (Claude may emit CommonMark; Telegram v1 uses single *)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text, flags=re.DOTALL)
+    # Escape _ between word characters to prevent accidental italic parsing
+    text = re.sub(r'(?<=\w)_(?=\w)', r'\\_', text)
+    # Escape [ that isn't the start of a [text](url) inline link
+    text = re.sub(r'\[(?![^\[\]\n]+\]\()', r'\\[', text)
+    return text
+
+
+async def _send_chunk_with_retry(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> bool:
+    """
+    Send one message chunk with up to max_retries attempts.
+    Returns True on success, False after all retries are exhausted.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return True
+        except Exception as e:
+            if attempt < max_retries:
+                logger.warning(
+                    f"Chunk send failed (attempt {attempt}/{max_retries}): {e} "
+                    f"— retrying in {retry_delay}s"
+                )
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"Chunk send failed after {max_retries} attempts: {e}")
+    return False
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -280,24 +332,29 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
 
     # ── 8. Send via Telegram ─────────────────────────────────────────────
     bot = Bot(token=bot_token)
-    send_error: Exception | None = None
+    any_chunk_failed = False
     try:
         for chunk in chunks:
-            await bot.send_message(
-                chat_id=int(telegram_id),
-                text=chunk,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-    except Exception as e:
-        logger.error(f"Telegram send error for {telegram_id}: {e}")
-        send_error = e
+            sanitized = _sanitize_markdown(chunk)
+            success = await _send_chunk_with_retry(bot, int(telegram_id), sanitized)
+            if not success:
+                any_chunk_failed = True
+                try:
+                    await bot.send_message(
+                        chat_id=int(telegram_id),
+                        text="Part of your briefing failed to send today. Use /brief to retry.",
+                    )
+                except Exception as fallback_err:
+                    logger.error(
+                        f"Fallback message also failed for {telegram_id}: {fallback_err}"
+                    )
     finally:
         # ── 9. Persist last_briefing_date ────────────────────────────────
         # Always save regardless of send success — prevents duplicate briefings
         # on retry if Telegram had a transient error after some chunks sent.
         _save_last_briefing_date(telegram_id, today_local.isoformat())
 
-    if send_error is None:
+    if not any_chunk_failed:
         logger.info(f"Briefing sent successfully for user {telegram_id}")
     else:
-        logger.warning(f"Briefing partially sent for user {telegram_id}; last_briefing_date saved.")
+        logger.warning(f"One or more chunks failed for user {telegram_id}; last_briefing_date saved.")
