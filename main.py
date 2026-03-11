@@ -30,7 +30,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from utils.market_data import validate_tickers_parallel
+from utils.market_data import validate_tickers_parallel, _get_client
 from utils.sheets import fetch_tickers_from_sheets, parse_excel_tickers
 from briefing import generate_briefing_for_user
 
@@ -1135,6 +1135,51 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch and display raw Finnhub quote data for watchlist + SPY/QQQ/DIA."""
+    uid = str(update.effective_user.id)
+    user = get_user(uid)
+    if not user or not user.get("onboarding_complete"):
+        await update.message.reply_text("Type /start to set up your account first.")
+        return
+
+    watchlist = user.get("watchlist", [])
+    tickers = sorted({w["ticker"] for w in watchlist} | {"SPY", "QQQ", "DIA"})
+
+    await update.message.reply_text("Fetching raw Finnhub quotes...")
+
+    def _fetch_quotes() -> list[tuple]:
+        client = _get_client()
+        rows = []
+        for symbol in tickers:
+            try:
+                q = client.quote(symbol)
+                rows.append((symbol, q))
+            except Exception as e:
+                rows.append((symbol, f"ERROR: {e}"))
+        return rows
+
+    rows = await asyncio.to_thread(_fetch_quotes)
+
+    from datetime import timezone as _tz
+    ts = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [f"[FINNHUB DEBUG - {ts}]", ""]
+
+    for symbol, q in rows:
+        if isinstance(q, str):
+            # Exception string
+            lines.append(f"{symbol:<6}  {q}")
+        elif not q or q.get("c", 0) == 0:
+            lines.append(f"{symbol:<6}  NO DATA (c=0)")
+        else:
+            lines.append(
+                f"{symbol:<6}  c={q.get('c')}  dp={q.get('dp')}%"
+                f"  o={q.get('o')}  pc={q.get('pc')}  d={q.get('d')}"
+            )
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "*Available commands:*\n\n"
@@ -1281,6 +1326,7 @@ async def post_init(application: Application) -> None:
         BotCommand("goals",     "Update investment goals"),
         BotCommand("help",      "Show available commands"),
         BotCommand("cancel",    "Cancel current operation"),
+        BotCommand("debug",     "Show raw Finnhub quote data"),
     ])
 
 
@@ -1350,6 +1396,7 @@ def main() -> None:
 
     app.add_handler(onboarding)
     app.add_handler(CommandHandler("brief",     cmd_brief))
+    app.add_handler(CommandHandler("debug",     cmd_debug))
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("settings",  cmd_settings))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
