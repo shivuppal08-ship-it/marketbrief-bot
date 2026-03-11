@@ -280,6 +280,7 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
 
     # ── 8. Send via Telegram ─────────────────────────────────────────────
     bot = Bot(token=bot_token)
+    send_error: Exception | None = None
     try:
         for chunk in chunks:
             await bot.send_message(
@@ -289,8 +290,14 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
             )
     except Exception as e:
         logger.error(f"Telegram send error for {telegram_id}: {e}")
-        return
+        send_error = e
+    finally:
+        # ── 9. Persist last_briefing_date ────────────────────────────────
+        # Always save regardless of send success — prevents duplicate briefings
+        # on retry if Telegram had a transient error after some chunks sent.
+        _save_last_briefing_date(telegram_id, today_local.isoformat())
 
-    # ── 9. Persist last_briefing_date ────────────────────────────────────
-    _save_last_briefing_date(telegram_id, today_local.isoformat())
-    logger.info(f"Briefing sent successfully for user {telegram_id}")
+    if send_error is None:
+        logger.info(f"Briefing sent successfully for user {telegram_id}")
+    else:
+        logger.warning(f"Briefing partially sent for user {telegram_id}; last_briefing_date saved.")
