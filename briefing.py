@@ -277,7 +277,7 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     section_prompts: list[str] = []
 
     section_prompts.append(build_market_pulse_prompt(index_data, headlines))
-    section_prompts.append(build_sectors_prompt(watchlist, sector_data, index_data))
+    section_prompts.append(build_sectors_prompt(watchlist, sector_data, index_data, stock_data))
 
     if outliers:
         section_prompts.append(
