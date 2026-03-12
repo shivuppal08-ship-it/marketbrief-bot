@@ -14,6 +14,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import anthropic
 import pytz
@@ -409,12 +410,39 @@ def _scheduler_tick() -> None:
     asyncio.run(_run())
 
 
+def _build_eod_cache_tick() -> None:
+    """Called at 4:30pm ET Mon-Fri by APScheduler. Builds the EOD close price cache."""
+    from utils.eod_cache import build_eod_cache
+    from utils.market_data import _get_client
+
+    users = load_users()
+    all_tickers = list({
+        w["ticker"]
+        for u in users.values()
+        for w in u.get("watchlist", [])
+    })
+    try:
+        build_eod_cache(all_tickers, _get_client())
+    except Exception as e:
+        logger.error(f"EOD cache build failed: {e}")
+
+
 def _start_apscheduler() -> None:
-    """Starts APScheduler in a background thread, ticking every minute."""
+    """Starts APScheduler in a background thread."""
     scheduler = BackgroundScheduler()
     scheduler.add_job(_scheduler_tick, "interval", minutes=1, id="briefing_scheduler")
+    scheduler.add_job(
+        _build_eod_cache_tick,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=16,
+            minute=30,
+            timezone="America/New_York",
+        ),
+        id="eod_cache_builder",
+    )
     scheduler.start()
-    logger.info("APScheduler started — checking for briefings every minute.")
+    logger.info("APScheduler started — briefing tick every minute, EOD cache at 4:30pm ET.")
 
 
 # ---------------------------------------------------------------------------

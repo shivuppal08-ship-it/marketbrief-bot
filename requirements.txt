@@ -7,3 +7,5 @@ pytz
 requests
 python-dotenv
 APScheduler
+yfinance
+pandas_market_calendars

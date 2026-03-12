@@ -25,6 +25,7 @@ from utils.market_data import (
     SECTOR_TO_ETF,
 )
 from utils.news import get_market_headlines, get_stock_news
+from utils.calendar_utils import is_trading_day, get_session_dates
 from utils.formatting import build_briefing_from_response, split_message
 from prompts.system_prompt import build_system_prompt
 from prompts.market_pulse import build_market_pulse_prompt
@@ -229,6 +230,20 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
         f"({now_local.strftime('%Y-%m-%d %H:%M %Z')})"
     )
 
+    # ── Trading day / session context ────────────────────────────────────
+    import pytz as _pytz
+    _et = _pytz.timezone("America/New_York")
+    _now_et = datetime.now(_et)
+    _et_minutes = _now_et.hour * 60 + _now_et.minute
+    if _et_minutes < 17 * 60 + 30:
+        brief_mode = "previous_session"
+        session_label = "yesterday"
+    else:
+        brief_mode = "current_session"
+        session_label = "today"
+
+    market_open_today = is_trading_day("NYSE", today_local)
+
     # ── 2. Parallel data fetch ───────────────────────────────────────────
     base_tasks = [
         asyncio.to_thread(get_index_data),
@@ -260,7 +275,24 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     outliers = detect_outliers(stock_data, sector_data, watchlist)
 
     outlier_news: dict = {}
-    if outliers:
+    watchlist_news: dict = {}  # populated when market is closed
+
+    if not market_open_today:
+        # Market closed — fetch news for ALL watchlist tickers
+        all_news_coros = {
+            w["ticker"]: asyncio.to_thread(
+                get_stock_news, w["ticker"], w.get("company_name", w["ticker"]), 3
+            )
+            for w in watchlist
+        }
+        all_news_results = await asyncio.gather(
+            *all_news_coros.values(), return_exceptions=True
+        )
+        for ticker, result in zip(all_news_coros.keys(), all_news_results):
+            watchlist_news[ticker] = (
+                result if not isinstance(result, Exception) else []
+            )
+    elif outliers:
         news_coros = {}
         for o in outliers:
             t = o["ticker"]
@@ -275,6 +307,23 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
 
     # ── 5. Assemble section prompts ──────────────────────────────────────
     section_prompts: list[str] = []
+
+    # Session context header — tells Claude which session the % changes belong to
+    _date_str = today_local.strftime("%A, %B %-d, %Y")
+    _context_header = (
+        f"TIME CONTEXT: Briefing generated at {now_local.strftime('%I:%M %p %Z')} "
+        f"on {_date_str}. "
+        f"Refer to all price changes as \"{session_label}'s performance\" throughout "
+        f"the briefing unless stating a specific date."
+    )
+    if not market_open_today:
+        _reason = "weekend" if today_local.weekday() >= 5 else "market holiday"
+        _context_header += (
+            f" NOTE: US equity markets are closed today ({_reason}). "
+            f"Price data reflects the most recent completed trading session. "
+            f"Focus on news and context rather than price movements."
+        )
+    section_prompts.append(_context_header)
 
     section_prompts.append(build_market_pulse_prompt(index_data, headlines))
     section_prompts.append(build_sectors_prompt(watchlist, sector_data, index_data, stock_data))
@@ -294,6 +343,23 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
 
     if is_friday:
         section_prompts.append(build_security_watch_prompt(user))
+
+    # When market is closed, append a watchlist news section for Claude to summarise
+    if not market_open_today and watchlist_news:
+        news_lines = ["SECTION: WATCHLIST NEWS (market closed)\n"]
+        for ticker, items in watchlist_news.items():
+            if items:
+                news_lines.append(f"{ticker}:")
+                for n in items:
+                    news_lines.append(f"  - {n['title']} ({n['source']})")
+            else:
+                news_lines.append(f"{ticker}: No recent news.")
+        news_lines.append(
+            "\nWrite a brief 2-3 sentence summary of any notable news for "
+            "the user's holdings while the market was closed. Skip tickers "
+            "with no news. If nothing is notable, skip this section entirely."
+        )
+        section_prompts.append("\n".join(news_lines))
 
     # Join sections with a lightweight separator so Claude sees them as distinct tasks
     combined_prompt = "\n\n---\n\n".join(section_prompts)
@@ -328,6 +394,19 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
 
     # ── 7. Format + split ────────────────────────────────────────────────
     full_briefing = build_briefing_from_response(claude_output, today_local)
+
+    if not market_open_today:
+        _reason = "weekend" if today_local.weekday() >= 5 else "market holiday"
+        try:
+            _s1, _ = get_session_dates("NYSE")
+            _s1_str = _s1.strftime("%B %-d")
+        except Exception:
+            _s1_str = "the last trading session"
+        full_briefing += (
+            f"\n\n🔒 US equity markets were closed ({_reason}). "
+            f"Prices reflect {_s1_str}'s close."
+        )
+
     chunks = split_message(full_briefing)
 
     # ── 8. Send via Telegram ─────────────────────────────────────────────

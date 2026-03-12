@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta
 
 import finnhub
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -306,28 +307,70 @@ def get_sector_data(sectors_needed: list[str]) -> dict:
 
 def get_stock_data(tickers: list[str]) -> dict:
     """
-    Returns for each ticker: today's % change and current price.
-    ETF detection: empty company profile → treat as ETF.
+    Returns for each ticker: EOD close price, % change, ETF flag, brief_mode,
+    and session_label.
+
+    Primary source: EOD close cache (utils/eod_cache.py) built at 4:30pm ET.
+    Fallback: Finnhub /quote (live intraday) with a WARNING log.
+
+    brief_mode / session_label:
+    - Before 17:30 ET → 'previous_session' / 'yesterday'
+    - At/after 17:30 ET → 'current_session' / 'today'
     """
+    from utils.eod_cache import load_eod_cache, is_cache_fresh
+
+    # Determine brief_mode from current ET time
+    _et = pytz.timezone("America/New_York")
+    now_et = datetime.now(_et)
+    if now_et.hour * 60 + now_et.minute < 17 * 60 + 30:
+        brief_mode = "previous_session"
+        session_label = "yesterday"
+    else:
+        brief_mode = "current_session"
+        session_label = "today"
+
+    # Load cache once
+    cache_tickers: dict = {}
+    if is_cache_fresh():
+        cache = load_eod_cache()
+        if cache:
+            cache_tickers = cache.get("tickers", {})
+
     results: dict = {}
 
     for ticker_str in tickers:
         try:
-            q = _quote(ticker_str)
-            if q is None:
-                results[ticker_str] = None
-                continue
-
-            # ETF detection: stocks have a company profile; ETFs return empty dict
-            profile = _profile(ticker_str)
-            is_etf_ticker = not bool(profile.get("name"))
-
-            results[ticker_str] = {
-                "ticker": ticker_str,
-                "price": round(q["c"], 2),
-                "change_pct": round(q["dp"], 2),
-                "is_etf": is_etf_ticker,
-            }
+            if ticker_str in cache_tickers:
+                entry = cache_tickers[ticker_str]
+                profile = _profile(ticker_str)
+                is_etf_ticker = not bool(profile.get("name"))
+                results[ticker_str] = {
+                    "ticker": ticker_str,
+                    "price": entry["session_1_close"],
+                    "change_pct": entry["change_pct"],
+                    "is_etf": is_etf_ticker,
+                    "brief_mode": brief_mode,
+                    "session_label": session_label,
+                }
+            else:
+                if cache_tickers:
+                    logger.warning(
+                        f"Cache miss for {ticker_str}, falling back to Finnhub quote."
+                    )
+                q = _quote(ticker_str)
+                if q is None:
+                    results[ticker_str] = None
+                    continue
+                profile = _profile(ticker_str)
+                is_etf_ticker = not bool(profile.get("name"))
+                results[ticker_str] = {
+                    "ticker": ticker_str,
+                    "price": round(q["c"], 2),
+                    "change_pct": round(q["dp"], 2),
+                    "is_etf": is_etf_ticker,
+                    "brief_mode": brief_mode,
+                    "session_label": session_label,
+                }
 
         except Exception as e:
             logger.warning(f"Failed to fetch stock data for {ticker_str}: {e}")
