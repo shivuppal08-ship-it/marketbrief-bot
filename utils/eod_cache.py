@@ -20,10 +20,22 @@ logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent.parent / "data" / "market_close_cache.json"
 
-# Always include these regardless of what users hold
-FIXED_TICKERS: list[str] = [
+# Always included regardless of user watchlists — broad market + all 11 sector ETFs
+REQUIRED_TICKERS: list[str] = [
+    # Broad market / index proxies
     "SPY", "QQQ", "DIA",
-    "XLK", "XLC", "XLV", "XLE", "XLF", "XLY", "XLI", "XLRE",
+    # Sector ETFs (full SPDR suite)
+    "XLK",   # Technology
+    "XLC",   # Communication Services
+    "XLV",   # Health Care
+    "XLE",   # Energy
+    "XLF",   # Financials
+    "XLY",   # Consumer Discretionary
+    "XLP",   # Consumer Staples
+    "XLI",   # Industrials
+    "XLRE",  # Real Estate
+    "XLB",   # Materials
+    "XLU",   # Utilities
 ]
 
 
@@ -33,7 +45,7 @@ def build_eod_cache(all_tickers: list[str], finnhub_client) -> None:
     Groups tickers by exchange calendar (NYSE / NSE / None for crypto).
     Saves results to CACHE_FILE as JSON.
     """
-    tickers = list(set(all_tickers) | set(FIXED_TICKERS))
+    tickers = list(set(all_tickers) | set(REQUIRED_TICKERS))
 
     # Group by calendar name
     groups: dict[str | None, list[str]] = {}

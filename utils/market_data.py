@@ -37,10 +37,10 @@ SECTOR_MAP: dict[str, str] = {
     "Energy": "Energy",
     "Financial Services": "Financials",
     "Financials": "Financials",
-    "Consumer Cyclical": "Consumer",
-    "Consumer Defensive": "Consumer",
-    "Consumer Discretionary": "Consumer",
-    "Consumer Staples": "Consumer",
+    "Consumer Cyclical": "Consumer Discretionary",
+    "Consumer Defensive": "Consumer Staples",
+    "Consumer Discretionary": "Consumer Discretionary",
+    "Consumer Staples": "Consumer Staples",
     "Industrials": "Industrials",
     "Real Estate": "Real Estate",
     "Utilities": "Utilities",
@@ -85,7 +85,9 @@ SECTOR_TO_ETF: dict[str, str] = {
     "Healthcare": "XLV",
     "Energy": "XLE",
     "Financials": "XLF",
-    "Consumer": "XLY",
+    "Consumer": "XLY",              # legacy value kept for backwards compat
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
     "Industrials": "XLI",
     "Real Estate": "XLRE",
     "Utilities": "XLU",
@@ -239,25 +241,47 @@ _TREASURY_SYMBOL = "^TNX"
 
 def get_index_data() -> dict:
     """
-    Returns today's performance for S&P 500, Nasdaq, Dow, and 10-yr Treasury.
+    Returns session performance for S&P 500 (SPY), Nasdaq 100 (QQQ), Dow (DIA),
+    and 10-yr Treasury.
 
-    S&P 500, Nasdaq, and Dow are proxied via SPY, QQQ, and DIA ETFs.
-    Treasury yield change is in percentage points (basis points / 100).
+    Primary source for SPY/QQQ/DIA: EOD close cache.
+    Fallback: Finnhub /quote with WARNING log — so index data is never absent.
+    Treasury yield is always fetched live from Finnhub.
     """
+    from utils.eod_cache import load_eod_cache, is_cache_fresh
+
+    cache_tickers: dict = {}
+    if is_cache_fresh():
+        cache = load_eod_cache()
+        if cache:
+            cache_tickers = cache.get("tickers", {})
+
     results: dict = {}
 
     for name, symbol in _INDEX_PROXIES.items():
-        q = _quote(symbol)
-        if q is None:
-            results[name] = None
-            continue
-        results[name] = {
-            "symbol": symbol,
-            "price": round(q["c"], 4),
-            "change_pct": round(q["dp"], 2),
-        }
+        entry = cache_tickers.get(symbol)
+        if entry:
+            results[name] = {
+                "symbol": symbol,
+                "price": entry["session_1_close"],
+                "change_pct": entry["change_pct"],
+            }
+        else:
+            if cache_tickers:
+                logger.warning(
+                    f"Cache miss for index proxy {symbol}, falling back to Finnhub quote."
+                )
+            q = _quote(symbol)
+            if q is None:
+                results[name] = None
+                continue
+            results[name] = {
+                "symbol": symbol,
+                "price": round(q["c"], 4),
+                "change_pct": round(q["dp"], 2),
+            }
 
-    # 10-yr Treasury yield — may return zeros on Finnhub free tier; handle gracefully
+    # 10-yr Treasury yield — always live from Finnhub (not in cache)
     try:
         q = _get_client().quote(_TREASURY_SYMBOL)
         if q and q.get("c", 0) != 0:
@@ -281,22 +305,45 @@ def get_index_data() -> dict:
 
 def get_sector_data(sectors_needed: list[str]) -> dict:
     """
-    Returns today's % change for each sector ETF corresponding to the user's
+    Returns session % change for each sector ETF corresponding to the user's
     watchlist sectors.  Key = ETF symbol, value = {change_pct, price}.
+
+    Primary source: EOD close cache (all sector ETFs are REQUIRED_TICKERS).
+    Fallback: Finnhub /quote with WARNING log on miss.
     """
+    from utils.eod_cache import load_eod_cache, is_cache_fresh
+
     etf_symbols = list({SECTOR_TO_ETF.get(s, "SPY") for s in sectors_needed})
     results: dict = {}
 
+    cache_tickers: dict = {}
+    if is_cache_fresh():
+        cache = load_eod_cache()
+        if cache:
+            cache_tickers = cache.get("tickers", {})
+
     for symbol in etf_symbols:
-        q = _quote(symbol)
-        if q is None:
-            results[symbol] = None
-            continue
-        results[symbol] = {
-            "symbol": symbol,
-            "price": round(q["c"], 2),
-            "change_pct": round(q["dp"], 2),
-        }
+        entry = cache_tickers.get(symbol)
+        if entry:
+            results[symbol] = {
+                "symbol": symbol,
+                "price": entry["session_1_close"],
+                "change_pct": entry["change_pct"],
+            }
+        else:
+            if cache_tickers:
+                logger.warning(
+                    f"Cache miss for sector ETF {symbol}, falling back to Finnhub quote."
+                )
+            q = _quote(symbol)
+            if q is None:
+                results[symbol] = None
+                continue
+            results[symbol] = {
+                "symbol": symbol,
+                "price": round(q["c"], 2),
+                "change_pct": round(q["dp"], 2),
+            }
 
     return results
 
