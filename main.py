@@ -1343,6 +1343,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def post_init(application: Application) -> None:
     """Register bot commands so they appear in Telegram's '/' menu."""
+    await application.bot.set_my_commands([])  # clear any previously registered commands
     await application.bot.set_my_commands([
         BotCommand("start",     "Set up your account"),
         BotCommand("brief",     "Generate your briefing right now"),
@@ -1354,7 +1355,7 @@ async def post_init(application: Application) -> None:
         BotCommand("goals",     "Update investment goals"),
         BotCommand("help",      "Show available commands"),
         BotCommand("cancel",    "Cancel current operation"),
-        BotCommand("debug",     "Show raw Finnhub quote data"),
+        # /debug intentionally excluded — still works when typed manually
     ])
 
 
