@@ -162,14 +162,11 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
     then enriches with Finnhub profile/beta for EQUITY tickers.
     Crypto tickers skip Finnhub profile calls entirely.
     """
-    from utils.ticker_resolver import resolve_ticker, CRYPTOCURRENCY, ETF, EQUITY, UNKNOWN
+    from utils.ticker_resolver import resolve_ticker
 
     try:
         symbol = ticker.upper()
         resolved = resolve_ticker(symbol, _get_client())
-
-        if resolved["asset_type"] == UNKNOWN:
-            return None
 
         yf_sym = resolved["yf_symbol"]
         finnhub_sym = resolved["finnhub_symbol"]
