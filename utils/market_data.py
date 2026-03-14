@@ -183,7 +183,7 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
             "status": "holding",
         }
 
-        if asset_type == CRYPTOCURRENCY:
+        if asset_type == "CRYPTOCURRENCY":
             return {
                 **base,
                 "company_name": symbol,
