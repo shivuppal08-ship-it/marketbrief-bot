@@ -39,25 +39,42 @@ REQUIRED_TICKERS: list[str] = [
 ]
 
 
-def build_eod_cache(all_tickers: list[str], finnhub_client) -> None:
+def build_eod_cache(watchlist_entries: list[dict], finnhub_client) -> None:
     """
-    Fetches EOD close prices for all_tickers + FIXED_TICKERS via yfinance.
-    Groups tickers by exchange calendar (NYSE / NSE / None for crypto).
+    Fetches EOD close prices for all watchlist tickers + REQUIRED_TICKERS via yfinance.
+
+    watchlist_entries: list of watchlist dicts from users.json, each containing at
+        minimum {"ticker": str} and optionally {"yf_symbol": str, "asset_type": str}.
+
+    Uses yf_symbol for yfinance downloads (handles crypto symbols like BTC-USD).
+    Cache is keyed by bare ticker so the rest of the pipeline stays unchanged.
+    Crypto entries (asset_type == CRYPTOCURRENCY) are skipped — no equity calendar.
     Saves results to CACHE_FILE as JSON.
     """
-    tickers = list(set(all_tickers) | set(REQUIRED_TICKERS))
+    # Build {ticker: yf_symbol} mapping from watchlist entries, skip crypto
+    ticker_to_yf: dict[str, str] = {}
+    for entry in watchlist_entries:
+        if entry.get("asset_type") == "CRYPTOCURRENCY":
+            continue
+        t = entry["ticker"]
+        ticker_to_yf[t] = entry.get("yf_symbol", t)
 
-    # Group by calendar name
-    groups: dict[str | None, list[str]] = {}
-    for ticker in tickers:
-        cal = get_exchange_for_ticker(ticker, finnhub_client)
-        groups.setdefault(cal, []).append(ticker)
+    # Always include required index / sector ETFs (all equity/ETF, yf_symbol == ticker)
+    for t in REQUIRED_TICKERS:
+        ticker_to_yf.setdefault(t, t)
+
+    # Group by exchange calendar using the yf_symbol for accurate detection
+    # Each group maps cal_name → list of (bare_ticker, yf_symbol) pairs
+    groups: dict[str | None, list[tuple[str, str]]] = {}
+    for ticker, yf_sym in ticker_to_yf.items():
+        cal = get_exchange_for_ticker(yf_sym, finnhub_client)
+        groups.setdefault(cal, []).append((ticker, yf_sym))
 
     result: dict = {}
 
-    for cal_name, ticker_list in groups.items():
+    for cal_name, ticker_yf_pairs in groups.items():
         if cal_name is None:
-            # Crypto — skip for now (no calendar-based EOD logic)
+            # Crypto or unknown exchange — skip calendar-based EOD logic
             continue
 
         try:
@@ -66,38 +83,44 @@ def build_eod_cache(all_tickers: list[str], finnhub_client) -> None:
             logger.warning(f"get_session_dates failed for {cal_name}: {e}")
             continue
 
+        yf_symbols = [yf_sym for _, yf_sym in ticker_yf_pairs]
+
         logger.info(
-            f"Building cache for {cal_name}: {len(ticker_list)} tickers, "
+            f"Building cache for {cal_name}: {len(yf_symbols)} tickers, "
             f"session_1={session_1}, session_2={session_2}"
         )
 
         try:
-            if len(ticker_list) == 1:
+            if len(yf_symbols) == 1:
                 raw = yf.download(
-                    ticker_list[0], period="5d", auto_adjust=False, progress=False
+                    yf_symbols[0], period="5d", auto_adjust=False, progress=False
                 )
                 if raw.empty or "Close" not in raw.columns:
-                    logger.warning(f"No data returned by yfinance for {ticker_list[0]}")
+                    logger.warning(f"No data returned by yfinance for {yf_symbols[0]}")
                     continue
-                close_map = {ticker_list[0]: raw["Close"]}
+                close_map = {yf_symbols[0]: raw["Close"]}
             else:
                 raw = yf.download(
-                    ticker_list, period="5d", auto_adjust=False, progress=False
+                    yf_symbols, period="5d", auto_adjust=False, progress=False
                 )
                 if raw.empty:
                     logger.warning(f"No data returned by yfinance for {cal_name} group")
                     continue
                 close_df = raw["Close"]
                 close_map = {
-                    t: close_df[t]
-                    for t in ticker_list
-                    if t in close_df.columns
+                    sym: close_df[sym]
+                    for sym in yf_symbols
+                    if sym in close_df.columns
                 }
         except Exception as e:
             logger.warning(f"yfinance download failed for {cal_name} group: {e}")
             continue
 
-        for ticker, series in close_map.items():
+        for bare_ticker, yf_sym in ticker_yf_pairs:
+            series = close_map.get(yf_sym)
+            if series is None:
+                logger.warning(f"No close series for {yf_sym} ({bare_ticker})")
+                continue
             try:
                 date_to_close: dict = {
                     idx.date(): float(val)
@@ -109,12 +132,13 @@ def build_eod_cache(all_tickers: list[str], finnhub_client) -> None:
 
                 if s1 is None or s2 is None or s2 == 0:
                     logger.warning(
-                        f"Missing close data for {ticker}: "
+                        f"Missing close data for {bare_ticker} ({yf_sym}): "
                         f"session_1={session_1}({s1}), session_2={session_2}({s2})"
                     )
                     continue
 
-                result[ticker] = {
+                # Cache keyed by bare ticker so downstream lookups stay unchanged
+                result[bare_ticker] = {
                     "session_1_date": session_1.isoformat(),
                     "session_1_close": round(s1, 2),
                     "session_2_date": session_2.isoformat(),
@@ -122,7 +146,7 @@ def build_eod_cache(all_tickers: list[str], finnhub_client) -> None:
                     "change_pct": round((s1 - s2) / s2 * 100, 2),
                 }
             except Exception as e:
-                logger.warning(f"Failed to process cache entry for {ticker}: {e}")
+                logger.warning(f"Failed to process cache entry for {bare_ticker}: {e}")
 
     cache = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

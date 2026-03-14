@@ -416,13 +416,17 @@ def _build_eod_cache_tick() -> None:
     from utils.market_data import _get_client
 
     users = load_users()
-    all_tickers = list({
-        w["ticker"]
-        for u in users.values()
-        for w in u.get("watchlist", [])
-    })
+    # Collect all unique watchlist entries (deduplicated by ticker)
+    seen: set[str] = set()
+    all_entries: list[dict] = []
+    for u in users.values():
+        for w in u.get("watchlist", []):
+            t = w["ticker"]
+            if t not in seen:
+                seen.add(t)
+                all_entries.append(w)
     try:
-        build_eod_cache(all_tickers, _get_client())
+        build_eod_cache(all_entries, _get_client())
     except Exception as e:
         logger.error(f"EOD cache build failed: {e}")
 
@@ -1292,11 +1296,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         parts = []
         if added:
-            parts.append(f"Added: {', '.join(w['ticker'] for w in added)} ✅")
+            added_strs = [
+                f"{w.get('yf_symbol', w['ticker'])} ({w.get('asset_type', 'EQUITY')})"
+                for w in added
+            ]
+            parts.append(f"Added: {', '.join(added_strs)} ✅")
         if already_there:
             parts.append(f"Already in watchlist: {', '.join(already_there)}")
         if invalid:
-            parts.append(f"Could not validate (skipped): {', '.join(invalid)}")
+            parts.append(
+                f"Could not find a security matching: {', '.join(invalid)}. "
+                "Please check the symbol(s) and try again."
+            )
 
         await update.message.reply_text("\n".join(parts) or "No changes made.")
         return

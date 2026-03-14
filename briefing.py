@@ -249,16 +249,16 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
         asyncio.to_thread(get_index_data),
         asyncio.to_thread(get_market_headlines, 5),
     ]
-    if tickers:
-        base_tasks.append(asyncio.to_thread(get_stock_data, tickers))
-        base_tasks.append(asyncio.to_thread(get_earnings_calendar, tickers))
+    if watchlist:
+        base_tasks.append(asyncio.to_thread(get_stock_data, watchlist))
+        base_tasks.append(asyncio.to_thread(get_earnings_calendar, watchlist))
 
     results = await asyncio.gather(*base_tasks, return_exceptions=True)
 
     index_data = results[0] if not isinstance(results[0], Exception) else {}
     headlines = results[1] if not isinstance(results[1], Exception) else []
-    stock_data = (results[2] if tickers and not isinstance(results[2], Exception) else {})
-    earnings_calendar = (results[3] if tickers and not isinstance(results[3], Exception) else [])
+    stock_data = (results[2] if watchlist and not isinstance(results[2], Exception) else {})
+    earnings_calendar = (results[3] if watchlist and not isinstance(results[3], Exception) else [])
 
     if isinstance(results[0], Exception):
         logger.error(f"get_index_data failed: {results[0]}")

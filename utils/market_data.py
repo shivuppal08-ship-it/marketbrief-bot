@@ -156,54 +156,79 @@ def classify_volatility(beta: float | None) -> str:
 def validate_and_enrich_ticker(ticker: str) -> dict | None:
     """
     Validates a ticker and returns an enriched watchlist entry dict, or None
-    if the ticker is invalid. Uses Finnhub company_profile2 + quote.
+    if the ticker cannot be resolved.
+
+    Uses resolve_ticker() (yfinance Lookup) as the primary resolution step,
+    then enriches with Finnhub profile/beta for EQUITY tickers.
+    Crypto tickers skip Finnhub profile calls entirely.
     """
+    from utils.ticker_resolver import resolve_ticker, CRYPTOCURRENCY, ETF, EQUITY, UNKNOWN
+
     try:
         symbol = ticker.upper()
-        profile = _profile(symbol)
+        resolved = resolve_ticker(symbol, _get_client())
+
+        if resolved["asset_type"] == UNKNOWN:
+            return None
+
+        yf_sym = resolved["yf_symbol"]
+        finnhub_sym = resolved["finnhub_symbol"]
+        asset_type = resolved["asset_type"]
+
+        base = {
+            "ticker": symbol,
+            "yf_symbol": yf_sym,
+            "asset_type": asset_type,
+            "finnhub_symbol": finnhub_sym,
+            "thesis": None,
+            "why_added": None,
+            "date_added": datetime.today().strftime("%Y-%m-%d"),
+            "status": "holding",
+        }
+
+        if asset_type == CRYPTOCURRENCY:
+            return {
+                **base,
+                "company_name": symbol,
+                "sector": "Cryptocurrency",
+                "volatility_tier": "high",
+            }
+
+        # ETF or EQUITY — attempt Finnhub profile
+        profile = _profile(finnhub_sym)
 
         if not profile.get("name"):
-            # Empty profile — ETF or unknown ticker.
-            # Confirm existence via quote before accepting.
-            q = _quote(symbol)
+            # No profile → treat as ETF / Broad Market
+            # Confirm existence via quote before accepting
+            q = _quote(finnhub_sym)
             if q is None:
                 return None
-            # Ticker exists but no profile — treat as ETF / Broad Market
             return {
-                "ticker": symbol,
+                **base,
                 "company_name": symbol,
                 "sector": "Broad Market",
-                "thesis": None,
-                "why_added": None,
                 "volatility_tier": "medium",
-                "date_added": datetime.today().strftime("%Y-%m-%d"),
-                "status": "holding",
             }
 
         company_name = profile.get("name", symbol)
         raw_industry = profile.get("finnhubIndustry", "")
         sector = _normalize_sector(raw_industry)
 
-        # Fetch beta from basic financials for volatility classification
         beta: float | None = None
         try:
-            metrics = _get_client().company_basic_financials(symbol, "all")
+            metrics = _get_client().company_basic_financials(finnhub_sym, "all")
             beta = (metrics.get("metric") or {}).get("beta")
         except Exception:
             pass
 
         return {
-            "ticker": symbol,
+            **base,
             "company_name": company_name,
             "sector": sector,
-            "thesis": None,
-            "why_added": None,
             "volatility_tier": classify_volatility(beta),
-            "date_added": datetime.today().strftime("%Y-%m-%d"),
-            "status": "holding",
         }
     except Exception as e:
-        logger.warning(f"Finnhub validation error for {ticker}: {e}")
+        logger.warning(f"Ticker validation error for {ticker}: {e}")
         return None
 
 
@@ -352,13 +377,16 @@ def get_sector_data(sectors_needed: list[str]) -> dict:
 # Individual stock data
 # ---------------------------------------------------------------------------
 
-def get_stock_data(tickers: list[str]) -> dict:
+def get_stock_data(watchlist: list[dict]) -> dict:
     """
     Returns for each ticker: EOD close price, % change, ETF flag, brief_mode,
     and session_label.
 
-    Primary source: EOD close cache (utils/eod_cache.py) built at 4:30pm ET.
-    Fallback: Finnhub /quote (live intraday) with a WARNING log.
+    watchlist: list of watchlist entry dicts, each containing at minimum
+        {"ticker": str} and optionally {"finnhub_symbol": str, "asset_type": str}.
+
+    Primary source: EOD close cache (keyed by bare ticker).
+    Fallback: Finnhub /quote using finnhub_symbol (skipped for CRYPTOCURRENCY).
 
     brief_mode / session_label:
     - Before 17:30 ET → 'previous_session' / 'yesterday'
@@ -366,7 +394,6 @@ def get_stock_data(tickers: list[str]) -> dict:
     """
     from utils.eod_cache import load_eod_cache, is_cache_fresh
 
-    # Determine brief_mode from current ET time
     _et = pytz.timezone("America/New_York")
     now_et = datetime.now(_et)
     if now_et.hour * 60 + now_et.minute < 17 * 60 + 30:
@@ -376,7 +403,6 @@ def get_stock_data(tickers: list[str]) -> dict:
         brief_mode = "current_session"
         session_label = "today"
 
-    # Load cache once
     cache_tickers: dict = {}
     if is_cache_fresh():
         cache = load_eod_cache()
@@ -385,12 +411,16 @@ def get_stock_data(tickers: list[str]) -> dict:
 
     results: dict = {}
 
-    for ticker_str in tickers:
+    for item in watchlist:
+        ticker_str = item["ticker"]
+        finnhub_sym = item.get("finnhub_symbol", ticker_str)
+        asset_type = item.get("asset_type", "")
+        is_crypto = asset_type == "CRYPTOCURRENCY"
+
         try:
             if ticker_str in cache_tickers:
                 entry = cache_tickers[ticker_str]
-                profile = _profile(ticker_str)
-                is_etf_ticker = not bool(profile.get("name"))
+                is_etf_ticker = asset_type == "ETF"
                 results[ticker_str] = {
                     "ticker": ticker_str,
                     "price": entry["session_1_close"],
@@ -399,16 +429,20 @@ def get_stock_data(tickers: list[str]) -> dict:
                     "brief_mode": brief_mode,
                     "session_label": session_label,
                 }
+            elif is_crypto:
+                # Crypto not in EOD cache — skip (no Finnhub equity quote for crypto)
+                logger.warning(f"No EOD cache entry for crypto {ticker_str}; skipping.")
+                results[ticker_str] = None
             else:
                 if cache_tickers:
                     logger.warning(
                         f"Cache miss for {ticker_str}, falling back to Finnhub quote."
                     )
-                q = _quote(ticker_str)
+                q = _quote(finnhub_sym)
                 if q is None:
                     results[ticker_str] = None
                     continue
-                profile = _profile(ticker_str)
+                profile = _profile(finnhub_sym)
                 is_etf_ticker = not bool(profile.get("name"))
                 results[ticker_str] = {
                     "ticker": ticker_str,
@@ -447,9 +481,11 @@ def get_beta(ticker: str) -> float | None:
 # Earnings calendar
 # ---------------------------------------------------------------------------
 
-def get_earnings_calendar(tickers: list[str]) -> list[dict]:
+def get_earnings_calendar(watchlist: list[dict]) -> list[dict]:
     """
-    Returns upcoming earnings within 14 days for tickers in the watchlist.
+    Returns upcoming earnings within 14 days for equity tickers in the watchlist.
+    Crypto tickers (asset_type == CRYPTOCURRENCY) and ETFs are skipped.
+    Uses finnhub_symbol for Finnhub calls.
     Results sorted by earnings date ascending.
     """
     today = datetime.today()
@@ -458,14 +494,23 @@ def get_earnings_calendar(tickers: list[str]) -> list[dict]:
     results: list[dict] = []
     client = _get_client()
 
-    for ticker_str in tickers:
+    for item in watchlist:
+        ticker_str = item["ticker"]
+        finnhub_sym = item.get("finnhub_symbol", ticker_str)
+        asset_type = item.get("asset_type", "")
+
+        if asset_type == "CRYPTOCURRENCY":
+            continue  # no earnings for crypto
+
         try:
             # ETFs don't have earnings — skip if profile is empty
-            profile = _profile(ticker_str)
+            profile = _profile(finnhub_sym)
             if not profile.get("name"):
                 continue
 
-            cal = client.earnings_calendar(_from=from_date, to=to_date, symbol=ticker_str)
+            cal = client.earnings_calendar(
+                _from=from_date, to=to_date, symbol=finnhub_sym
+            )
             entries = (cal or {}).get("earningsCalendar") or []
             if entries:
                 results.append({
