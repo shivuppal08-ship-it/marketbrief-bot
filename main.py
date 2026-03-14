@@ -1458,7 +1458,7 @@ def main() -> None:
     #          webhook_url=os.environ["WEBHOOK_URL"],  # e.g. https://your-app.onrender.com/<TOKEN>
     #      )
     logger.info("MarketBrief bot is running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
