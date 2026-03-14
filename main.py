@@ -96,6 +96,14 @@ DATA_DIR = os.environ.get(
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
+# One-time seed: if persistent disk has no users.json, copy from repo-local fallback
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_FALLBACK_USERS = os.path.join(_REPO_ROOT, "data", "users.json")
+if not os.path.exists(USERS_FILE) and os.path.exists(_FALLBACK_USERS):
+    import shutil
+    shutil.copy2(_FALLBACK_USERS, USERS_FILE)
+    logging.getLogger(__name__).info("SEED: Copied users.json to persistent disk.")
+
 # ---------------------------------------------------------------------------
 # Timezone lookup tables
 # ---------------------------------------------------------------------------
