@@ -1212,6 +1212,53 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-time migration: resolve bare tickers to yf_symbol/asset_type/finnhub_symbol."""
+    from utils.ticker_resolver import resolve_ticker
+
+    await update.message.reply_text("Running ticker migration — please wait...")
+
+    def _run_migration() -> tuple[list[str], int, int]:
+        users = load_users()
+        lines: list[str] = []
+        total_resolved = 0
+        users_affected = 0
+        client = _get_client()
+
+        for uid, profile in users.items():
+            watchlist = profile.get("watchlist", [])
+            user_resolved = 0
+            for entry in watchlist:
+                if "yf_symbol" not in entry:
+                    bare = entry.get("ticker", "")
+                    resolved = resolve_ticker(bare, client)
+                    entry["yf_symbol"]      = resolved["yf_symbol"]
+                    entry["asset_type"]     = resolved["asset_type"]
+                    entry["finnhub_symbol"] = resolved["finnhub_symbol"]
+                    lines.append(
+                        f"[MIGRATED] {bare} → {resolved['yf_symbol']} ({resolved['asset_type']})"
+                    )
+                    user_resolved += 1
+                    total_resolved += 1
+            if user_resolved:
+                users_affected += 1
+
+        save_users(users)
+        return lines, total_resolved, users_affected
+
+    lines, total_resolved, users_affected = await asyncio.to_thread(_run_migration)
+
+    summary_lines = lines if lines else ["No tickers needed migration."]
+    summary_lines.append(
+        f"\nMigration complete: {total_resolved} tickers resolved for {users_affected} users"
+    )
+
+    # Telegram message limit is 4096 chars; chunk if needed
+    message = "\n".join(summary_lines)
+    for i in range(0, len(message), 4000):
+        await update.message.reply_text(message[i : i + 4000])
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "*Available commands:*\n\n"
@@ -1437,6 +1484,7 @@ def main() -> None:
     app.add_handler(onboarding)
     app.add_handler(CommandHandler("brief",     cmd_brief))
     app.add_handler(CommandHandler("debug",     cmd_debug))
+    app.add_handler(CommandHandler("migrate",   cmd_migrate))  # hidden — not in menu
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("settings",  cmd_settings))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
