@@ -13,7 +13,6 @@ import json
 import logging
 import os
 from datetime import datetime, date
-from pathlib import Path
 
 import pytz
 from dotenv import load_dotenv
@@ -28,11 +27,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-USERS_FILE = Path(__file__).parent / "data" / "users.json"
+DATA_DIR = os.environ.get(
+    "RENDER_DISK_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+)
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 
 def load_users() -> dict:
-    if not USERS_FILE.exists():
+    if not os.path.exists(USERS_FILE):
         return {}
     with open(USERS_FILE) as f:
         return json.load(f)

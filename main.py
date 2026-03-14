@@ -89,7 +89,11 @@ def _esc(text: str) -> str:
     GOALS_CONFIRM,
 ) = range(6)
 
-USERS_FILE = "data/users.json"
+DATA_DIR = os.environ.get(
+    "RENDER_DISK_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+)
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # ---------------------------------------------------------------------------
 # Timezone lookup tables
@@ -333,7 +337,7 @@ def load_users() -> dict:
 
 
 def save_users(users: dict) -> None:
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, indent=2)
 
@@ -1418,6 +1422,8 @@ async def post_init(application: Application) -> None:
 
 
 def main() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment / .env file")

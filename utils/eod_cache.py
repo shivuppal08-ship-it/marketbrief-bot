@@ -8,8 +8,8 @@ get_stock_data() in market_data.py reads the cache before falling back to Finnhu
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -18,7 +18,11 @@ from utils.calendar_utils import get_exchange_for_ticker, get_session_dates
 
 logger = logging.getLogger(__name__)
 
-CACHE_FILE = Path(__file__).parent.parent / "data" / "market_close_cache.json"
+DATA_DIR = os.environ.get(
+    "RENDER_DISK_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"),
+)
+CACHE_FILE = os.path.join(DATA_DIR, "market_close_cache.json")
 
 # Always included regardless of user watchlists — broad market + all 11 sector ETFs
 REQUIRED_TICKERS: list[str] = [
@@ -153,7 +157,7 @@ def build_eod_cache(watchlist_entries: list[dict], finnhub_client) -> None:
         "tickers": result,
     }
 
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
@@ -162,7 +166,7 @@ def build_eod_cache(watchlist_entries: list[dict], finnhub_client) -> None:
 
 def load_eod_cache() -> dict | None:
     """Reads and returns the cache dict, or None if the file doesn't exist."""
-    if not CACHE_FILE.exists():
+    if not os.path.exists(CACHE_FILE):
         return None
     try:
         with open(CACHE_FILE) as f:

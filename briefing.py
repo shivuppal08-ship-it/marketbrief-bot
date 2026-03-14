@@ -10,7 +10,10 @@ import logging
 import os
 import re
 from datetime import datetime
-from pathlib import Path
+DATA_DIR = os.environ.get(
+    "RENDER_DISK_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+)
 
 import anthropic
 import pytz
@@ -39,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
 
-USERS_FILE = Path(__file__).parent / "data" / "users.json"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # Outlier thresholds: absolute |% move| required per volatility tier
 OUTLIER_THRESHOLDS: dict[str, float] = {
