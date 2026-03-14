@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 DATA_DIR = os.environ.get(
     "RENDER_DISK_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"),
 )
 
 import anthropic

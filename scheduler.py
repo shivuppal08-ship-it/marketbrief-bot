@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = os.environ.get(
     "RENDER_DISK_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"),
 )
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 

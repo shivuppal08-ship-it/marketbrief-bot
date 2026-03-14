@@ -91,8 +91,9 @@ def _esc(text: str) -> str:
 
 DATA_DIR = os.environ.get(
     "RENDER_DISK_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"),
 )
+os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # ---------------------------------------------------------------------------
