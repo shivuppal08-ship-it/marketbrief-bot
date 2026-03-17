@@ -58,15 +58,15 @@ User profiles and delivery preferences are stored in JSON on a Render Persistent
 
 ## Key Technical Challenges Solved
 
-**Data accuracy** — yfinance EOD closes (unadjusted) vs Finnhub live quotes. Finnhub's `dp` field returns intraday % change, which is 0 outside market hours. Solved by building a session-close cache using yfinance and falling back to Finnhub only for live intraday data.
+**Data accuracy**: yfinance EOD closes (unadjusted) vs Finnhub live quotes. Finnhub's `dp` field returns intraday % change, which is 0 outside market hours. Solved by building a session-close cache using yfinance and falling back to Finnhub only for live intraday data.
 
-**Crypto ticker resolution** — built a ticker resolver using `yfinance fast_info.quote_type` to correctly classify and route BTC/ETH/SOL (→ Binance symbols) vs equities vs ETFs, avoiding wasted Finnhub calls for crypto.
+**Crypto ticker resolution**: built a ticker resolver using `yfinance fast_info.quote_type` to correctly classify and route BTC/ETH/SOL (→ Binance symbols) vs equities vs ETFs, avoiding wasted Finnhub calls for crypto.
 
-**Persistent storage on ephemeral cloud** — migrated from Render's ephemeral filesystem to Persistent Disk with path-aware seeding logic (`RENDER_DISK_PATH` env var + first-run seed copy).
+**Persistent storage on ephemeral cloud**: migrated from Render's ephemeral filesystem to Persistent Disk with path-aware seeding logic (`RENDER_DISK_PATH` env var + first-run seed copy).
 
-**Trading calendar awareness** — `pandas_market_calendars` for NYSE/NSE/crypto-aware session detection. Weekend and holiday briefings still fire, delivering a markets-closed brief with crypto prices and news instead of silently skipping.
+**Trading calendar awareness**: `pandas_market_calendars` for NYSE/NSE/crypto-aware session detection. Weekend and holiday briefings still fire, delivering a markets-closed brief with crypto prices and news instead of silently skipping.
 
-**Deployment reliability** — APScheduler running inside the Render web service (not GitHub Actions) for precise per-minute scheduling with no cold-start gaps.
+**Deployment reliability**: APScheduler running inside the Render web service (not GitHub Actions) for precise per-minute scheduling with no cold-start gaps.
 
 ---
 
@@ -80,9 +80,9 @@ Production debugging with real financial data APIs, cloud deployment constraints
 
 Active development continues. Upcoming work includes:
 
-- **Content quality** — smarter On the Radar with event deduplication, progressive concept memory
-- **Personalization depth** — holdings vs watchlist distinction, goal-driven brief framing
-- **Scale reliability** — SQLite migration, staggered delivery, rate limit management
+- **Content quality**: smarter On the Radar with event deduplication, progressive concept memory
+- **Personalization depth**: holdings vs watchlist distinction, goal-driven brief framing
+- **Scale reliability**: SQLite migration, staggered delivery, rate limit management
 
 ---
 
@@ -96,9 +96,7 @@ Active development continues. Upcoming work includes:
 | `ANTHROPIC_API_KEY` | From [console.anthropic.com](https://console.anthropic.com/) |
 | `FINNHUB_API_KEY` | From [finnhub.io](https://finnhub.io/) |
 | `NEWS_API_KEY` | From [newsapi.org](https://newsapi.org/) |
-| `RENDER_DISK_PATH` | Path to Render Persistent Disk mount (e.g. `/opt/render/project/data`) |
-
-Copy `.env.example` to `.env` and fill in your values for local development.
+| `RENDER_DISK_PATH` | Path to Render Persistent Disk mount |
 
 ### Install & Run
 
