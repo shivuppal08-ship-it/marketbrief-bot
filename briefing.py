@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 DATA_DIR = os.environ.get(
     "RENDER_DISK_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"),
@@ -238,12 +238,29 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     _et = _pytz.timezone("America/New_York")
     _now_et = datetime.now(_et)
     _et_minutes = _now_et.hour * 60 + _now_et.minute
+
+    try:
+        _session_1, _session_2 = get_session_dates("NYSE")
+    except Exception:
+        _session_1 = today_local - timedelta(days=1)
+
+    _yesterday = today_local - timedelta(days=1)
+
+    def _format_session_label(d) -> str:
+        """Return 'yesterday' if d is yesterday, otherwise 'Friday, March 13'-style."""
+        if d == _yesterday:
+            return "yesterday"
+        return d.strftime("%A, %B %-d")
+
     if _et_minutes < 17 * 60 + 30:
         brief_mode = "previous_session"
-        session_label = "yesterday"
+        session_label = _format_session_label(_session_1)
     else:
         brief_mode = "current_session"
-        session_label = "today"
+        if _session_1 == today_local:
+            session_label = "today"
+        else:
+            session_label = _format_session_label(_session_1)
 
     market_open_today = is_trading_day("NYSE", today_local)
 

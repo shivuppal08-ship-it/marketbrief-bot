@@ -385,9 +385,6 @@ def _should_send_briefing(user: dict, now_utc: datetime) -> bool:
 
     now_local = now_utc.astimezone(tz)
 
-    if now_local.weekday() >= 5:  # skip weekends
-        return False
-
     today_str = now_local.date().isoformat()
     if user.get("last_briefing_date") == today_str:
         return False
