@@ -22,9 +22,9 @@ Supports US equities, ETFs, and crypto. Delivers in morning and evening modes de
 
 ## Screenshots
 
-[Market Pulse] <img width="590" height="1278" alt="MarketPulse" src="https://github.com/user-attachments/assets/c65cdd4d-0931-4a60-81f3-d1c73a46cac7" />
+[Market Pulse] <img width="250" height="541" alt="MarketPulse" src="https://github.com/user-attachments/assets/c65cdd4d-0931-4a60-81f3-d1c73a46cac7" />
 
-[Your Sectors] <img width="590" height="1278" alt="YourSectors" src="https://github.com/user-attachments/assets/53845b06-32cf-4336-b6b7-5cdb41bbf576" />
+[Your Sectors] <img width="250" height="541" alt="YourSectors" src="https://github.com/user-attachments/assets/53845b06-32cf-4336-b6b7-5cdb41bbf576" />
 
 ---
 
