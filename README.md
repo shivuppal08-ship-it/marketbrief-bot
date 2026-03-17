@@ -10,11 +10,11 @@ A Telegram bot that delivers personalized daily market briefings powered by AI.
 
 MarketBrief runs on a schedule and sends each user a personalized daily market brief via Telegram. Each briefing covers:
 
-- **Market Pulse** — broad index movements (S&P 500, Nasdaq, Dow)
-- **Your Sectors** — sector-by-sector performance of the user's specific holdings
-- **Outlier Alerts** — unusual moves in watchlist positions that diverge from their sector
-- **Today's Concept** — a daily investing concept calibrated to the user's knowledge level
-- **On the Radar** — forward-looking section covering upcoming earnings, macro events, and news relevant to their watchlist
+- **Market Pulse**: broad index movements (S&P 500, Nasdaq, Dow)
+- **Your Sectors**: sector-by-sector performance of the user's specific holdings
+- **Outlier Alerts**: unusual moves in watchlist positions that diverge from their sector
+- **Today's Concept**: a daily investing concept calibrated to the user's knowledge level
+- **On the Radar**: forward-looking section covering upcoming earnings, macro events, and news relevant to their watchlist
 
 Supports US equities, ETFs, and crypto. Delivers in morning and evening modes depending on user preference.
 
