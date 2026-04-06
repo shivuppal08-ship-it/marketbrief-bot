@@ -15,15 +15,11 @@ NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 NEWS_API_BASE = "https://newsapi.org/v2"
 
 # NewsAPI free tier allows searching the past 30 days.
-# Preferred sources are queried first; if none match, the query widens.
-MARKET_SOURCES = (
-    "reuters,the-wall-street-journal,bloomberg,cnbc,financial-times,"
-    "the-economist,fortune,business-insider"
-)
-
 
 def _today_str() -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc)
+    hours_back = 72 if now.weekday() in (5, 6) else 24
+    return (now - timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _fetch(endpoint: str, params: dict) -> dict:
@@ -63,19 +59,19 @@ def get_market_headlines(n: int = 5) -> list[dict]:
     Tries preferred sources first; falls back to a broader query if needed.
     """
     data = _fetch("everything", {
-        "q": "stock market OR financial markets OR S&P 500",
+        "q": "stock market OR S&P 500 OR Federal Reserve OR earnings",
         "language": "en",
         "sortBy": "publishedAt",
         "pageSize": n * 3,
-        "sources": MARKET_SOURCES,
+        "domains": "reuters.com,cnbc.com,apnews.com,marketwatch.com,investors.com",
         "from": _today_str(),
     })
     articles = data.get("articles", [])
 
-    # Fallback: widen search if no results from preferred sources
+    # Fallback: widen search if no results from preferred domains
     if len(articles) < n:
         data = _fetch("everything", {
-            "q": "stock market OR \"financial markets\" OR \"S&P 500\"",
+            "q": "stock market OR economy OR inflation OR Federal Reserve",
             "language": "en",
             "sortBy": "publishedAt",
             "pageSize": n * 3,
