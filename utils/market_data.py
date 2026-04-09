@@ -10,8 +10,19 @@ from datetime import datetime, timedelta
 
 import finnhub
 import pytz
+import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+_ASSET_CLASS_MAP: dict[str, str] = {
+    "CRYPTOCURRENCY": "Crypto",
+    "ETF":            "ETF",
+    "EQUITY":         "Stock",
+}
+
+
+def _asset_class(asset_type: str) -> str:
+    return _ASSET_CLASS_MAP.get(asset_type, "Other")
 
 # Finnhub client — lazy-initialized singleton
 _finnhub_client: finnhub.Client | None = None
@@ -176,6 +187,7 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
             "ticker": symbol,
             "yf_symbol": yf_sym,
             "asset_type": asset_type,
+            "asset_class": _asset_class(asset_type),
             "finnhub_symbol": finnhub_sym,
             "thesis": None,
             "why_added": None,
@@ -188,6 +200,7 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
                 **base,
                 "company_name": symbol,
                 "sector": "Cryptocurrency",
+                "sub_category": None,
                 "volatility_tier": "high",
             }
 
@@ -204,6 +217,7 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
                 **base,
                 "company_name": symbol,
                 "sector": "Broad Market",
+                "sub_category": None,
                 "volatility_tier": "medium",
             }
 
@@ -218,10 +232,18 @@ def validate_and_enrich_ticker(ticker: str) -> dict | None:
         except Exception:
             pass
 
+        sub_category: str | None = None
+        if asset_type == "EQUITY":
+            try:
+                sub_category = yf.Ticker(yf_sym).info.get("sector") or None
+            except Exception:
+                pass
+
         return {
             **base,
             "company_name": company_name,
             "sector": sector,
+            "sub_category": sub_category,
             "volatility_tier": classify_volatility(beta),
         }
     except Exception as e:

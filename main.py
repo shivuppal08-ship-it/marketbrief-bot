@@ -31,6 +31,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+import yfinance as yf
+
 from utils.market_data import validate_tickers_parallel, _get_client
 from utils.sheets import fetch_tickers_from_sheets, parse_excel_tickers
 from briefing import generate_briefing_for_user
@@ -1427,8 +1429,57 @@ async def post_init(application: Application) -> None:
     ])
 
 
+_ASSET_CLASS_MAP: dict[str, str] = {
+    "CRYPTOCURRENCY": "Crypto",
+    "ETF":            "ETF",
+    "EQUITY":         "Stock",
+}
+
+
+def _backfill_asset_class() -> None:
+    """
+    On startup, fills asset_class (and sub_category for stocks) for any
+    watchlist entry where asset_class is absent or None.
+    Uses yfinance fast_info.quote_type — no hardcoded mappings.
+    """
+    users = load_users()
+    changed = False
+
+    for uid, profile in users.items():
+        for entry in profile.get("watchlist", []):
+            if entry.get("asset_class") is not None:
+                continue  # already set
+
+            ticker = entry.get("yf_symbol") or entry.get("ticker", "")
+            if not ticker:
+                continue
+
+            try:
+                quote_type = yf.Ticker(ticker).fast_info.quote_type
+                asset_class = _ASSET_CLASS_MAP.get(quote_type, "Other")
+                entry["asset_class"] = asset_class
+
+                if asset_class == "Stock":
+                    try:
+                        entry["sub_category"] = yf.Ticker(ticker).info.get("sector") or None
+                    except Exception:
+                        entry["sub_category"] = None
+                else:
+                    entry["sub_category"] = None
+
+                changed = True
+                logger.info(f"BACKFILL: {ticker} → {asset_class}")
+            except Exception as e:
+                logger.warning(f"BACKFILL: could not resolve {ticker}: {e}")
+
+    if changed:
+        save_users(users)
+        logger.info("BACKFILL: asset_class backfill complete, users.json updated")
+
+
 def main() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
+    _backfill_asset_class()
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
