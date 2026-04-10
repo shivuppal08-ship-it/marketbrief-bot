@@ -55,7 +55,7 @@ def _user_is_eligible(user: dict, now_utc: datetime) -> bool:
     """
     if not user.get("onboarding_complete"):
         return False
-    if not user.get("watchlist"):
+    if not user.get("invested") and not user.get("watchlist"):
         return False
 
     tz_str = user.get("timezone", "UTC")

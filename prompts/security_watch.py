@@ -6,17 +6,17 @@ Only called on Fridays.
 
 
 def build_security_watch_prompt(user: dict) -> str:
-    watchlist = user.get("watchlist", [])
+    all_securities = user.get("invested", []) + user.get("watchlist", [])
     goals_summary = user.get("goals_summary", "")
     knowledge_level = user.get("knowledge_level", "intermediate")
 
     watchlist_full = "\n".join(
         f"- {w['ticker']} | {w.get('company_name', '—')} | {w.get('sector', '—')} | "
         f"thesis: {w.get('thesis') or '—'} | vol: {w.get('volatility_tier', '—')}"
-        for w in watchlist
-    ) or "(empty watchlist)"
+        for w in all_securities
+    ) or "(no securities)"
 
-    existing_tickers = ", ".join(w["ticker"] for w in watchlist) or "none"
+    existing_tickers = ", ".join(w["ticker"] for w in all_securities) or "none"
 
     return f"""SECTION: SECURITY TO WATCH
 

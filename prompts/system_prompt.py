@@ -6,12 +6,12 @@ Builds the master system prompt per user, inserting their profile and watchlist.
 from datetime import datetime
 
 
-def _format_watchlist_table(watchlist: list[dict]) -> str:
-    if not watchlist:
-        return "(No tickers in watchlist)"
+def _format_securities_table(securities: list[dict]) -> str:
+    if not securities:
+        return "(none)"
     lines = ["Ticker | Company | Sector | Thesis | Volatility | Status"]
     lines.append("-------|---------|--------|--------|------------|-------")
-    for w in watchlist:
+    for w in securities:
         thesis = (w.get("thesis") or "—")[:50]
         lines.append(
             f"{w['ticker']} | {w.get('company_name', '—')} | {w.get('sector', '—')} | "
@@ -25,13 +25,15 @@ def build_system_prompt(user: dict) -> str:
     knowledge_level = user.get("knowledge_level", "intermediate")
     concept_frequency = user.get("concept_frequency", "daily")
     goals_summary = user.get("goals_summary", "")
+    invested = user.get("invested", [])
     watchlist = user.get("watchlist", [])
 
-    watchlist_table = _format_watchlist_table(watchlist)
+    invested_table = _format_securities_table(invested)
+    watchlist_table = _format_securities_table(watchlist)
 
     return f"""You are a personalized daily market briefing assistant. Your job is to help \
 the user learn how financial markets work and stay informed about their \
-investment watchlist — through insight, not just information. Your highest \
+portfolio and watchlist — through insight, not just information. Your highest \
 priority is this: every section should connect a dot, not just report a fact. \
 Information alone doesn't create habits — insight does.
 
@@ -42,7 +44,11 @@ Knowledge Level: {knowledge_level}
 Concept Frequency: {concept_frequency}
 Goals & Intent: {goals_summary}
 
-WATCHLIST
+OWNED (currently invested)
+────────────
+{invested_table}
+
+WATCHING (not yet owned)
 ────────────
 {watchlist_table}
 Columns: Ticker | Company | Sector | Thesis | Volatility Tier | Status

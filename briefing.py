@@ -214,7 +214,8 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     9. Persist last_briefing_date.
     """
     telegram_id = str(user["telegram_id"])
-    watchlist: list[dict] = user.get("watchlist", [])
+    # Combine owned + watching into a single list for briefing purposes
+    watchlist: list[dict] = user.get("invested", []) + user.get("watchlist", [])
     tickers = [w["ticker"] for w in watchlist]
 
     # ── 1. Local datetime ────────────────────────────────────────────────

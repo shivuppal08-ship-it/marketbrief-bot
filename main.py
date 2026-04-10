@@ -83,13 +83,19 @@ def _esc(text: str) -> str:
 # Conversation states
 # ---------------------------------------------------------------------------
 (
+    INVESTED,
     WATCHLIST,
     KNOWLEDGE_LEVEL,
     CONCEPT_FREQ,
     TIMEZONE_TIME,
     GOALS,
     GOALS_CONFIRM,
-) = range(6)
+) = range(7)
+
+
+def _get_all_securities(user: dict) -> list[dict]:
+    """Returns the combined invested + watchlist entries for a user."""
+    return user.get("invested", []) + user.get("watchlist", [])
 
 DATA_DIR = os.environ.get(
     "RENDER_DISK_PATH",
@@ -372,7 +378,7 @@ def _should_send_briefing(user: dict, now_utc: datetime) -> bool:
     """
     if not user.get("onboarding_complete"):
         return False
-    if not user.get("watchlist"):
+    if not _get_all_securities(user):
         return False
 
     tz_str = user.get("timezone", "UTC")
@@ -424,11 +430,11 @@ def _build_eod_cache_tick() -> None:
     from utils.market_data import _get_client
 
     users = load_users()
-    # Collect all unique watchlist entries (deduplicated by ticker)
+    # Collect all unique security entries across invested + watchlist (deduplicated by ticker)
     seen: set[str] = set()
     all_entries: list[dict] = []
     for u in users.values():
-        for w in u.get("watchlist", []):
+        for w in _get_all_securities(u):
             t = w["ticker"]
             if t not in seen:
                 seen.add(t)
@@ -557,29 +563,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         "Welcome\\! I'm your daily Market Brief bot 📊\n\n"
-        "I'll send you a personalized market briefing every weekday morning "
+        "I'll send you a personalized market briefing every morning "
         "to help you learn investing and stay on top of your portfolio\\.\n\n"
         "Let's get you set up — it takes less than 2 minutes\\.\n\n"
-        "First, send me your watchlist\\. You can:\n"
-        "• Type tickers separated by commas \\(e\\.g\\. VOO, NVDA, AAPL\\)\n"
-        "• Share a Google Sheets link\n"
-        "• Upload an Excel file \\(\\.xlsx\\)\n\n"
-        "📌 *Crypto assets must include the \\-USD suffix* \\(e\\.g\\. BTC\\-USD, ETH\\-USD, SOL\\-USD\\)\\.\n\n"
-        "You can always add or remove securities later by messaging me anytime\\.",
+        "*Step 1 of 2:* What securities do you currently *own*\\?\n\n"
+        "Type tickers separated by commas \\(e\\.g\\. VOO, NVDA, AAPL\\), "
+        "share a Google Sheets link, or upload an Excel file \\(\\.xlsx\\)\\.\n\n"
+        "📌 *Crypto must use the \\-USD suffix* \\(e\\.g\\. BTC\\-USD, ETH\\-USD, SOL\\-USD\\)\\.\n\n"
+        "If you don't own anything yet, just send a dash: *\\-*",
+        parse_mode="MarkdownV2",
+    )
+    return INVESTED
+
+
+# ---------------------------------------------------------------------------
+# Onboarding Step 1 — Invested (currently owned)
+# ---------------------------------------------------------------------------
+
+def _parse_tickers_from_text(text: str) -> list[str]:
+    return [
+        t.strip().upper()
+        for t in re.split(r"[,\s]+", text)
+        if t.strip() and re.match(r"^[A-Z0-9.\-\^]+$", t.strip().upper())
+    ]
+
+
+async def handle_invested(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = str(update.effective_user.id)
+    text = update.message.text.strip()
+
+    if text == "-":
+        # User owns nothing yet — skip to watchlist step
+        update_user(uid, {"invested": []})
+    else:
+        if _SHEETS_URL_RE.search(text):
+            await update.message.reply_text("Fetching tickers from Google Sheets...")
+            try:
+                raw_tickers = await asyncio.to_thread(fetch_tickers_from_sheets, text)
+            except ValueError as e:
+                await update.message.reply_text(f"Could not read the sheet: {e}\nPlease try again.")
+                return INVESTED
+        else:
+            raw_tickers = _parse_tickers_from_text(text)
+
+        result = await _process_tickers(raw_tickers, update)
+        if result is None:
+            return INVESTED
+
+        valid, invalid = result
+        update_user(uid, {"invested": valid})
+
+        resp = f"Got it — {len(valid)} owned ticker(s): {', '.join(w['ticker'] for w in valid)} ✅"
+        if invalid:
+            resp += f"\n\nCould not validate and skipped: {', '.join(invalid)}"
+        await update.message.reply_text(resp)
+
+    await update.message.reply_text(
+        "*Step 2 of 2:* What securities are you *watching* but don't own yet\\?\n\n"
+        "Type tickers separated by commas \\(e\\.g\\. TSLA, ARKG\\)\\.\n\n"
+        "📌 *Crypto must use the \\-USD suffix* \\(e\\.g\\. BTC\\-USD, ETH\\-USD, SOL\\-USD\\)\\.\n\n"
+        "If you have no watchlist yet, just send a dash: *\\-*",
         parse_mode="MarkdownV2",
     )
     return WATCHLIST
 
 
 # ---------------------------------------------------------------------------
-# Onboarding Step 1 — Watchlist
+# Onboarding Step 2 — Watchlist (watching but not owned)
 # ---------------------------------------------------------------------------
 
 async def handle_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = str(update.effective_user.id)
     text = update.message.text.strip()
 
-    # Google Sheets URL
+    if text == "-":
+        update_user(uid, {"watchlist": []})
+        return await _ask_knowledge_level(update)
+
     if _SHEETS_URL_RE.search(text):
         await update.message.reply_text("Fetching your watchlist from Google Sheets...")
         try:
@@ -588,12 +648,7 @@ async def handle_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text(f"Could not read the sheet: {e}\nPlease try again.")
             return WATCHLIST
     else:
-        # Comma or whitespace separated tickers
-        raw_tickers = [
-            t.strip().upper()
-            for t in re.split(r"[,\s]+", text)
-            if t.strip() and re.match(r"^[A-Z0-9.\-\^]+$", t.strip().upper())
-        ]
+        raw_tickers = _parse_tickers_from_text(text)
 
     result = await _process_tickers(raw_tickers, update)
     if result is None:
@@ -965,21 +1020,35 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Type /start to set up your account first.")
         return
 
+    invested = user.get("invested", [])
     watchlist = user.get("watchlist", [])
+
+    parts = []
+    if invested:
+        lines = [
+            f"• {_esc(w['ticker'])} — {_esc(w.get('company_name', '—'))} \\({_esc(w.get('sector', 'Unknown'))}\\)"
+            for w in invested
+        ]
+        parts.append("*Owned:*\n" + "\n".join(lines))
     if watchlist:
         lines = [
             f"• {_esc(w['ticker'])} — {_esc(w.get('company_name', '—'))} \\({_esc(w.get('sector', 'Unknown'))}\\)"
             for w in watchlist
         ]
+        parts.append("*Watching:*\n" + "\n".join(lines))
+
+    if parts:
         text = (
-            "*Your watchlist:*\n" + "\n".join(lines) +
-            "\n\nTo add: send *Add TICKER* \\(e\\.g\\. Add TSLA\\)\n"
-            "To remove: send *Remove TICKER* \\(e\\.g\\. Remove TSLA\\)"
+            "\n\n".join(parts) +
+            "\n\nTo add to *owned*: send *Add invested TICKER*\n"
+            "To add to *watching*: send *Add watching TICKER*\n"
+            "To remove: send *Remove TICKER*"
         )
     else:
         text = (
-            "Your watchlist is empty\\.\n\n"
-            "To add tickers, send: *Add VOO, AAPL*"
+            "You have no securities yet\\.\n\n"
+            "To add owned: *Add invested VOO, AAPL*\n"
+            "To add watching: *Add watching TSLA*"
         )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
@@ -1056,21 +1125,33 @@ async def handle_settings_callback(
 
     if data == "settings:watchlist":
         context.user_data.pop("re_running", None)  # not entering a flow
+        invested = user.get("invested", [])
         watchlist = user.get("watchlist", [])
+        parts = []
+        if invested:
+            lines = [
+                f"• {w['ticker']} — {w.get('company_name', '—')} \\({w.get('sector', 'Unknown')}\\)"
+                for w in invested
+            ]
+            parts.append("*Owned:*\n" + "\n".join(lines))
         if watchlist:
             lines = [
                 f"• {w['ticker']} — {w.get('company_name', '—')} \\({w.get('sector', 'Unknown')}\\)"
                 for w in watchlist
             ]
+            parts.append("*Watching:*\n" + "\n".join(lines))
+        if parts:
             text = (
-                "*Your watchlist:*\n" + "\n".join(lines) +
-                "\n\nTo add: send *Add TICKER* \\(e\\.g\\. Add TSLA\\)\n"
-                "To remove: send *Remove TICKER* \\(e\\.g\\. Remove TSLA\\)"
+                "\n\n".join(parts) +
+                "\n\nTo add to *owned*: send *Add invested TICKER*\n"
+                "To add to *watching*: send *Add watching TICKER*\n"
+                "To remove: send *Remove TICKER*"
             )
         else:
             text = (
-                "Your watchlist is empty\\.\n\n"
-                "To add tickers, send: *Add VOO, AAPL*"
+                "You have no securities yet\\.\n\n"
+                "To add owned: *Add invested VOO, AAPL*\n"
+                "To add watching: *Add watching TSLA*"
             )
         await query.message.reply_text(text, parse_mode="MarkdownV2")
         return ConversationHandler.END
@@ -1156,9 +1237,9 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user or not user.get("onboarding_complete"):
         await update.message.reply_text("Type /start to set up your account first.")
         return
-    if not user.get("watchlist"):
+    if not _get_all_securities(user):
         await update.message.reply_text(
-            "Your watchlist is empty — add some tickers first \\(e\\.g\\. *Add VOO, AAPL*\\)\\.",
+            "You have no securities yet — add some tickers first \\(e\\.g\\. *Add VOO, AAPL*\\)\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1184,7 +1265,7 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Type /start to set up your account first.")
         return
 
-    watchlist = user.get("watchlist", [])
+    watchlist = _get_all_securities(user)
     tickers = sorted({w["ticker"] for w in watchlist} | {"SPY", "QQQ", "DIA"})
 
     await update.message.reply_text("Fetching raw Finnhub quotes...")
@@ -1312,53 +1393,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── show my watchlist ────────────────────────────────────────────────
     if "show my watchlist" in lower or lower == "watchlist":
+        invested = user.get("invested", [])
         watchlist = user.get("watchlist", [])
-        if not watchlist:
-            await update.message.reply_text("Your watchlist is currently empty.")
+        parts = []
+        if invested:
+            lines = [f"• {w['ticker']} — {w.get('company_name', '—')} ({w.get('sector', 'Unknown')})" for w in invested]
+            parts.append("*Owned:*\n" + "\n".join(lines))
+        if watchlist:
+            lines = [f"• {w['ticker']} — {w.get('company_name', '—')} ({w.get('sector', 'Unknown')})" for w in watchlist]
+            parts.append("*Watching:*\n" + "\n".join(lines))
+        if parts:
+            await update.message.reply_text("\n\n".join(parts), parse_mode="Markdown")
         else:
-            lines = [
-                f"• {w['ticker']} — {w.get('company_name', '—')} ({w.get('sector', 'Unknown')})"
-                for w in watchlist
-            ]
-            await update.message.reply_text(
-                "*Your watchlist:*\n" + "\n".join(lines),
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text("You have no securities yet.")
         return
 
-    # ── add [TICKER(S)] ──────────────────────────────────────────────────
+    # ── add [invested|watching] [TICKER(S)] ─────────────────────────────
     add_match = re.match(r'^add\s+(.+)$', lower)
     if add_match:
-        ticker_str = raw_text[4:].strip()
-        raw_tickers = [
-            t.strip().upper()
-            for t in re.split(r"[,\s]+", ticker_str)
-            if t.strip()
-        ]
+        rest = raw_text[4:].strip()
+        # Determine target list from optional keyword
+        if rest.lower().startswith("invested "):
+            target_list = "invested"
+            ticker_str = rest[9:].strip()
+        elif rest.lower().startswith("watching "):
+            target_list = "watchlist"
+            ticker_str = rest[9:].strip()
+        else:
+            target_list = "watchlist"  # default
+            ticker_str = rest
+
+        raw_tickers = _parse_tickers_from_text(ticker_str)
 
         result = await _process_tickers(raw_tickers, update)
         if result is None:
             return
 
         valid, invalid = result
-        current_watchlist = user.get("watchlist", [])
-        existing_tickers = {w["ticker"] for w in current_watchlist}
+        current_list = user.get(target_list, [])
+        existing_tickers = {w["ticker"] for w in current_list}
 
         added = [w for w in valid if w["ticker"] not in existing_tickers]
         already_there = [w["ticker"] for w in valid if w["ticker"] in existing_tickers]
 
-        updated_watchlist = current_watchlist + added
-        update_user(uid, {"watchlist": updated_watchlist})
+        update_user(uid, {target_list: current_list + added})
 
+        label = "owned" if target_list == "invested" else "watching"
         parts = []
         if added:
             added_strs = [
                 f"{w.get('yf_symbol', w['ticker'])} ({w.get('asset_type', 'EQUITY')})"
                 for w in added
             ]
-            parts.append(f"Added: {', '.join(added_strs)} ✅")
+            parts.append(f"Added to {label}: {', '.join(added_strs)} ✅")
         if already_there:
-            parts.append(f"Already in watchlist: {', '.join(already_there)}")
+            parts.append(f"Already in {label}: {', '.join(already_there)}")
         if invalid:
             parts.append(
                 f"Could not find a security matching: {', '.join(invalid)}. "
@@ -1372,16 +1461,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     remove_match = re.match(r'^remove\s+(\S+)$', lower)
     if remove_match:
         ticker = raw_text[7:].strip().upper()
-        current_watchlist = user.get("watchlist", [])
-        new_watchlist = [w for w in current_watchlist if w["ticker"] != ticker]
+        invested = user.get("invested", [])
+        watchlist = user.get("watchlist", [])
+        new_invested = [w for w in invested if w["ticker"] != ticker]
+        new_watchlist = [w for w in watchlist if w["ticker"] != ticker]
 
-        if len(new_watchlist) == len(current_watchlist):
-            await update.message.reply_text(
-                f"{ticker} is not in your watchlist."
-            )
+        if len(new_invested) == len(invested) and len(new_watchlist) == len(watchlist):
+            await update.message.reply_text(f"{ticker} is not in your securities.")
         else:
-            update_user(uid, {"watchlist": new_watchlist})
-            await update.message.reply_text(f"Removed {ticker} from your watchlist. ✅")
+            update_user(uid, {"invested": new_invested, "watchlist": new_watchlist})
+            await update.message.reply_text(f"Removed {ticker}. ✅")
         return
 
     # ── unrecognized ─────────────────────────────────────────────────────
@@ -1443,7 +1532,7 @@ def _backfill_asset_class() -> None:
     changed = False
 
     for uid, profile in users.items():
-        for entry in profile.get("watchlist", []):
+        for entry in _get_all_securities(profile):
             if entry.get("asset_class") is not None:
                 continue  # already set
 
@@ -1521,6 +1610,13 @@ def main() -> None:
             ),
         ],
         states={
+            INVESTED: [
+                MessageHandler(
+                    filters.Document.FileExtension("xlsx"),
+                    handle_watchlist_document,
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_invested),
+            ],
             WATCHLIST: [
                 MessageHandler(
                     filters.Document.FileExtension("xlsx"),
