@@ -568,7 +568,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "• Type tickers separated by commas \\(e\\.g\\. VOO, NVDA, AAPL\\)\n"
         "• Share a Google Sheets link\n"
         "• Upload an Excel file \\(\\.xlsx\\)\n\n"
-        "You can always add or remove stocks later by messaging me anytime\\.",
+        "📌 *Crypto assets must include the \\-USD suffix* \\(e\\.g\\. BTC\\-USD, ETH\\-USD, SOL\\-USD\\)\\.\n\n"
+        "You can always add or remove securities later by messaging me anytime\\.",
         parse_mode="MarkdownV2",
     )
     return WATCHLIST
@@ -1456,6 +1457,8 @@ def _backfill_asset_class() -> None:
 
             try:
                 quote_type = yf.Ticker(ticker).fast_info.quote_type
+                if not quote_type:
+                    raise ValueError("empty quote_type")
                 asset_class = _ASSET_CLASS_MAP.get(quote_type, "Other")
                 entry["asset_class"] = asset_class
 
@@ -1470,7 +1473,12 @@ def _backfill_asset_class() -> None:
                 changed = True
                 logger.info(f"BACKFILL: {ticker} → {asset_class}")
             except Exception as e:
-                logger.warning(f"BACKFILL: could not resolve {ticker}: {e}")
+                bare = entry.get("ticker", ticker)
+                logger.warning(
+                    f"WARNING: {bare} could not be resolved (error: {e}). "
+                    f"If this is a crypto asset, re-enter it as {bare}-USD "
+                    f"via the Add command (e.g. 'Add {bare}-USD')."
+                )
 
     if changed:
         save_users(users)
