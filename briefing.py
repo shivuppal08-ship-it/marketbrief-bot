@@ -268,7 +268,7 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     # ── 2. Parallel data fetch ───────────────────────────────────────────
     base_tasks = [
         asyncio.to_thread(get_index_data),
-        asyncio.to_thread(get_market_headlines, 5),
+        asyncio.to_thread(get_market_headlines, 5, user),
     ]
     if watchlist:
         base_tasks.append(asyncio.to_thread(get_stock_data, watchlist))
@@ -302,7 +302,7 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
         # Market closed — fetch news for ALL watchlist tickers
         all_news_coros = {
             w["ticker"]: asyncio.to_thread(
-                get_stock_news, w["ticker"], w.get("company_name", w["ticker"]), 3
+                get_stock_news, w["ticker"], w.get("company_name", w["ticker"]), 3, user
             )
             for w in watchlist
         }
@@ -320,7 +320,7 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
             company = next(
                 (w.get("company_name", t) for w in watchlist if w["ticker"] == t), t
             )
-            news_coros[t] = asyncio.to_thread(get_stock_news, t, company, 3)
+            news_coros[t] = asyncio.to_thread(get_stock_news, t, company, 3, user)
 
         news_results = await asyncio.gather(*news_coros.values(), return_exceptions=True)
         for ticker, result in zip(news_coros.keys(), news_results):
