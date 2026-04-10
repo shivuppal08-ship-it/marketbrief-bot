@@ -29,6 +29,7 @@ from utils.market_data import (
 )
 from utils.news import get_market_headlines, get_stock_news
 from utils.calendar_utils import is_trading_day, get_session_dates
+from utils.weekly_perf import get_weekly_performance
 from utils.formatting import build_briefing_from_response, split_message
 from prompts.system_prompt import build_system_prompt
 from prompts.market_pulse import build_market_pulse_prompt
@@ -37,6 +38,8 @@ from prompts.outlier import build_outlier_prompt
 from prompts.concept import build_concept_prompt
 from prompts.radar import build_radar_prompt
 from prompts.security_watch import build_security_watch_prompt
+from prompts.week_in_review import build_week_in_review_prompt
+from prompts.weekend_roundup import build_weekend_roundup_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +200,188 @@ async def _send_chunk_with_retry(
     return False
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Claude call + send helpers ────────────────────────────────────────────────
+
+async def _claude_and_send(
+    telegram_id: str,
+    today_local,
+    system_prompt: str,
+    combined_prompt: str,
+    bot_token: str,
+    footer: str = "",
+) -> None:
+    """Single Claude streaming call, format, split, send, persist date."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
+
+    try:
+        async with anthropic_client.messages.stream(
+            model=MODEL,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": combined_prompt}],
+        ) as stream:
+            final_message = await stream.get_final_message()
+        claude_output: str = final_message.content[0].text
+    except anthropic.APIConnectionError as e:
+        logger.error(f"Claude connection error for {telegram_id}: {e}")
+        return
+    except anthropic.RateLimitError as e:
+        logger.error(f"Claude rate limit for {telegram_id}: {e}")
+        return
+    except anthropic.APIStatusError as e:
+        logger.error(f"Claude API status {e.status_code} for {telegram_id}: {e.message}")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected Claude error for {telegram_id}: {e}")
+        return
+
+    full_text = build_briefing_from_response(claude_output, today_local)
+    if footer:
+        full_text += footer
+
+    bot = Bot(token=bot_token)
+    any_chunk_failed = False
+    try:
+        for chunk in split_message(full_text):
+            success = await _send_chunk_with_retry(bot, int(telegram_id), _sanitize_markdown(chunk))
+            if not success:
+                any_chunk_failed = True
+                try:
+                    await bot.send_message(
+                        chat_id=int(telegram_id),
+                        text="Part of your briefing failed to send. Use /brief to retry.",
+                    )
+                except Exception as fe:
+                    logger.error(f"Fallback message failed for {telegram_id}: {fe}")
+    finally:
+        _save_last_briefing_date(telegram_id, today_local.isoformat())
+
+    if not any_chunk_failed:
+        logger.info(f"Briefing sent successfully for user {telegram_id}")
+    else:
+        logger.warning(f"One or more chunks failed for user {telegram_id}; date saved.")
+
+
+# ── Sunday: Week in Review ────────────────────────────────────────────────────
+
+async def generate_week_in_review_for_user(user: dict, bot_token: str) -> None:
+    """Sunday pipeline: weekly performance summary + macro themes + week ahead."""
+    telegram_id = str(user["telegram_id"])
+    tz_str = user.get("timezone", "UTC")
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.utc
+
+    now_local = datetime.now(tz)
+    today_local = now_local.date()
+
+    logger.info(f"[WEEK IN REVIEW] Generating for user {telegram_id}")
+
+    invested  = user.get("invested", [])
+    watchlist = user.get("watchlist", [])
+    all_entries = invested + watchlist
+
+    invested_perf, watchlist_perf, headlines, earnings = await asyncio.gather(
+        asyncio.to_thread(get_weekly_performance, invested),
+        asyncio.to_thread(get_weekly_performance, watchlist),
+        asyncio.to_thread(get_market_headlines, 20, user),
+        asyncio.to_thread(get_earnings_calendar, all_entries),
+        return_exceptions=True,
+    )
+
+    if isinstance(invested_perf, Exception):
+        logger.error(f"weekly_perf invested failed: {invested_perf}")
+        invested_perf = []
+    if isinstance(watchlist_perf, Exception):
+        logger.error(f"weekly_perf watchlist failed: {watchlist_perf}")
+        watchlist_perf = []
+    if isinstance(headlines, Exception):
+        logger.error(f"headlines failed: {headlines}")
+        headlines = []
+    if isinstance(earnings, Exception):
+        logger.error(f"earnings failed: {earnings}")
+        earnings = []
+
+    # Filter headlines to those scoring >= 4 (already done by get_market_headlines,
+    # but re-confirm and keep metadata)
+    scored = [a for a in (headlines or []) if a.get("relevance_score", 0) >= 4]
+
+    combined_prompt = build_week_in_review_prompt(
+        user=user,
+        invested_perf=invested_perf,
+        watchlist_perf=watchlist_perf,
+        scored_headlines=scored,
+        earnings_calendar=earnings,
+    )
+
+    system_prompt = build_system_prompt(user)
+    await _claude_and_send(telegram_id, today_local, system_prompt, combined_prompt, bot_token)
+
+
+# ── Monday: Weekend News Roundup ──────────────────────────────────────────────
+
+async def generate_weekend_roundup_for_user(user: dict, bot_token: str) -> None:
+    """Monday pipeline: weekend news only, no price data. Silent if no articles score >= 4."""
+    telegram_id = str(user["telegram_id"])
+    tz_str = user.get("timezone", "UTC")
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.utc
+
+    now_local = datetime.now(tz)
+    today_local = now_local.date()
+
+    logger.info(f"[WEEKEND ROUNDUP] Generating for user {telegram_id}")
+
+    try:
+        raw_articles = await asyncio.to_thread(get_market_headlines, 30, user)
+    except Exception as e:
+        logger.error(f"Weekend roundup news fetch failed for {telegram_id}: {e}")
+        return
+
+    scored = [a for a in raw_articles if a.get("relevance_score", 0) >= 4]
+
+    if not scored:
+        logger.info(
+            f"[WEEKEND ROUNDUP] No articles scored >= 4 for user {telegram_id} — skipping briefing."
+        )
+        _save_last_briefing_date(telegram_id, today_local.isoformat())
+        return
+
+    combined_prompt = build_weekend_roundup_prompt(user=user, scored_articles=scored)
+    system_prompt = build_system_prompt(user)
+    await _claude_and_send(telegram_id, today_local, system_prompt, combined_prompt, bot_token)
+
+
+# ── Dispatch entry point ──────────────────────────────────────────────────────
+
+async def dispatch_briefing_for_user(user: dict, bot_token: str) -> None:
+    """
+    Routes to the correct briefing pipeline based on the user's local day of week:
+      Sunday (6)  → Week in Review
+      Monday (0)  → Weekend News Roundup
+      Tue–Sat     → Standard daily briefing
+    """
+    tz_str = user.get("timezone", "UTC")
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.utc
+
+    weekday = datetime.now(tz).weekday()  # 0=Mon … 6=Sun
+
+    if weekday == 6:
+        await generate_week_in_review_for_user(user, bot_token)
+    elif weekday == 0:
+        await generate_weekend_roundup_for_user(user, bot_token)
+    else:
+        await generate_briefing_for_user(user, bot_token)
+
+
+# ── Standard daily briefing pipeline ─────────────────────────────────────────
 
 async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
     """
@@ -360,62 +544,36 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
             build_concept_prompt(index_data, sector_data, outliers, user)
         )
 
-    section_prompts.append(build_radar_prompt(watchlist, earnings_calendar))
-
     if is_friday:
         section_prompts.append(build_security_watch_prompt(user))
 
-    # When market is closed, append a watchlist news section for Claude to summarise
+    # When market is closed, append a watchlist news section for Claude to summarise.
+    # Silence principle: only include tickers that have actual news.
     if not market_open_today and watchlist_news:
-        news_lines = ["SECTION: WATCHLIST NEWS (market closed)\n"]
-        for ticker, items in watchlist_news.items():
-            if items:
+        tickers_with_news = {t: items for t, items in watchlist_news.items() if items}
+        if tickers_with_news:
+            news_lines = ["SECTION: WATCHLIST NEWS (market closed)\n"]
+            for ticker, items in tickers_with_news.items():
                 news_lines.append(f"{ticker}:")
                 for n in items:
                     news_lines.append(f"  - {n['title']} ({n['source']})")
-            else:
-                news_lines.append(f"{ticker}: No recent news.")
-        news_lines.append(
-            "\nWrite a brief 2-3 sentence summary of any notable news for "
-            "the user's holdings while the market was closed. Skip tickers "
-            "with no news. If nothing is notable, skip this section entirely."
-        )
-        section_prompts.append("\n".join(news_lines))
+            news_lines.append(
+                "\nSILENCE RULE: Write a brief summary of genuinely notable news only. "
+                "Skip any ticker where the news isn't meaningfully relevant. "
+                "If nothing is notable, produce no output for this section at all."
+            )
+            section_prompts.append("\n".join(news_lines))
+
+    # Radar — silence principle: skip entirely if no upcoming events
+    radar_prompt = build_radar_prompt(watchlist, earnings_calendar)
+    if radar_prompt:
+        section_prompts.append(radar_prompt)
 
     # Join sections with a lightweight separator so Claude sees them as distinct tasks
     combined_prompt = "\n\n---\n\n".join(section_prompts)
 
-    # ── 6. Single Claude streaming call ─────────────────────────────────
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
-    system_prompt = build_system_prompt(user)
-
-    try:
-        async with anthropic_client.messages.stream(
-            model=MODEL,
-            max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": combined_prompt}],
-        ) as stream:
-            final_message = await stream.get_final_message()
-
-        claude_output: str = final_message.content[0].text
-    except anthropic.APIConnectionError as e:
-        logger.error(f"Claude connection error for {telegram_id}: {e}")
-        return
-    except anthropic.RateLimitError as e:
-        logger.error(f"Claude rate limit for {telegram_id}: {e}")
-        return
-    except anthropic.APIStatusError as e:
-        logger.error(f"Claude API status {e.status_code} for {telegram_id}: {e.message}")
-        return
-    except Exception as e:
-        logger.error(f"Unexpected Claude error for {telegram_id}: {e}")
-        return
-
-    # ── 7. Format + split ────────────────────────────────────────────────
-    full_briefing = build_briefing_from_response(claude_output, today_local)
-
+    # ── 6–9. Claude call + send ──────────────────────────────────────────
+    footer = ""
     if not market_open_today:
         _reason = "weekend" if today_local.weekday() >= 5 else "market holiday"
         try:
@@ -423,38 +581,10 @@ async def generate_briefing_for_user(user: dict, bot_token: str) -> None:
             _s1_str = _s1.strftime("%B %-d")
         except Exception:
             _s1_str = "the last trading session"
-        full_briefing += (
+        footer = (
             f"\n\n🔒 US equity markets were closed ({_reason}). "
             f"Prices reflect {_s1_str}'s close."
         )
 
-    chunks = split_message(full_briefing)
-
-    # ── 8. Send via Telegram ─────────────────────────────────────────────
-    bot = Bot(token=bot_token)
-    any_chunk_failed = False
-    try:
-        for chunk in chunks:
-            sanitized = _sanitize_markdown(chunk)
-            success = await _send_chunk_with_retry(bot, int(telegram_id), sanitized)
-            if not success:
-                any_chunk_failed = True
-                try:
-                    await bot.send_message(
-                        chat_id=int(telegram_id),
-                        text="Part of your briefing failed to send today. Use /brief to retry.",
-                    )
-                except Exception as fallback_err:
-                    logger.error(
-                        f"Fallback message also failed for {telegram_id}: {fallback_err}"
-                    )
-    finally:
-        # ── 9. Persist last_briefing_date ────────────────────────────────
-        # Always save regardless of send success — prevents duplicate briefings
-        # on retry if Telegram had a transient error after some chunks sent.
-        _save_last_briefing_date(telegram_id, today_local.isoformat())
-
-    if not any_chunk_failed:
-        logger.info(f"Briefing sent successfully for user {telegram_id}")
-    else:
-        logger.warning(f"One or more chunks failed for user {telegram_id}; last_briefing_date saved.")
+    system_prompt = build_system_prompt(user)
+    await _claude_and_send(telegram_id, today_local, system_prompt, combined_prompt, bot_token, footer)

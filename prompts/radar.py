@@ -49,41 +49,40 @@ def build_radar_prompt(
         f"{w['ticker']} ({w.get('sector', '?')})" for w in watchlist
     )
 
-    if earnings_calendar:
-        earnings_lines = "\n".join(
-            f"- {e['ticker']}: earnings {e['earnings_date']}"
-            for e in earnings_calendar
-        )
-    else:
-        earnings_lines = "- No earnings in the next 14 days for your watchlist."
+    earnings_lines = "\n".join(
+        f"- {e['ticker']}: earnings {e['earnings_date']}"
+        for e in earnings_calendar
+    ) if earnings_calendar else ""
 
     macro_events = _get_upcoming_macro_events()
-    if macro_events:
-        macro_lines = "\n".join(
-            f"- {e['date']}: {e['event']}" for e in macro_events
-        )
-    else:
-        macro_lines = "- No major Fed or macro events in the next 14 days."
+    macro_lines = "\n".join(
+        f"- {e['date']}: {e['event']}" for e in macro_events
+    ) if macro_events else ""
+
+    upcoming_block = "\n".join(filter(None, [earnings_lines, macro_lines]))
+
+    if not upcoming_block:
+        # Nothing to report — silence principle: return empty string so caller can skip
+        return ""
 
     return f"""SECTION: ON THE RADAR
 
 User's watchlist: {tickers_and_sectors}
 
 Upcoming events in the next 7-14 days:
-Earnings:
-{earnings_lines}
-
-Fed events and major economic releases:
-{macro_lines}
+{upcoming_block}
 
 Identify the single most relevant upcoming event for this user's specific watchlist.
+
+SILENCE RULE: If nothing listed is genuinely relevant to this user's holdings,
+produce NO output for this section — not even the header.
 
 Requirements:
 - One event only. The most relevant to their holdings.
 - Explain what the event is, when it is, and why it matters to something \
 specific in their watchlist.
 - For earnings: name which holding is affected and why the result could \
-matter (e.g. "Apple is a major VOO component").
+matter.
 - For macro events: explain what outcome to watch for and how each likely \
 outcome affects their sector mix.
 - Be specific. No vague forward-looking statements.

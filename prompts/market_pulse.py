@@ -22,12 +22,9 @@ def build_market_pulse_prompt(
     else:
         tn_str = "unavailable"
 
-    if headlines:
-        headlines_formatted = "\n".join(
-            f"- {h['title']} ({h['source']})" for h in headlines
-        )
-    else:
-        headlines_formatted = "- No headlines available from NewsAPI today."
+    headlines_formatted = "\n".join(
+        f"- {h['title']} ({h['source']})" for h in headlines
+    ) if headlines else ""
 
     return f"""SECTION: MARKET PULSE
 
@@ -38,7 +35,10 @@ Today's market data:
 - 10-Year Treasury Yield: {tn_str}
 
 Top market headlines today:
-{headlines_formatted}
+{headlines_formatted if headlines_formatted else "(none available)"}
+
+SILENCE RULE: If no headlines are available and all index moves are under 0.3%,
+do not pad the section — state plainly what is known and move on.
 
 Write the Market Pulse section of today's briefing.
 

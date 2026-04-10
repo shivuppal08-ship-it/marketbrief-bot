@@ -35,7 +35,7 @@ import yfinance as yf
 
 from utils.market_data import validate_tickers_parallel, _get_client
 from utils.sheets import fetch_tickers_from_sheets, parse_excel_tickers
-from briefing import generate_briefing_for_user
+from briefing import generate_briefing_for_user, dispatch_briefing_for_user
 
 load_dotenv()
 
@@ -418,7 +418,7 @@ def _scheduler_tick() -> None:
     logger.info(f"APScheduler: {len(eligible)} user(s) eligible — sending briefing(s).")
 
     async def _run():
-        tasks = [generate_briefing_for_user(u, bot_token) for u in eligible]
+        tasks = [dispatch_briefing_for_user(u, bot_token) for u in eligible]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(_run())
